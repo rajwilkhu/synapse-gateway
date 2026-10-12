@@ -69,6 +69,13 @@ fi
 
 sed -i "s/^version = \".*\"/version = \"${NEW_VERSION}\"/" "$CARGO_TOML"
 
+# Path dependencies in [workspace.dependencies] pin a version requirement next
+# to `path`; leaving it stale makes cargo unable to resolve the crate we just
+# bumped (`^0.1.0` no longer matches 1.0.0).
+if grep -q "^${CRATE} = {.*path = \"crates/${CRATE}\"" Cargo.toml; then
+  sed -i "/^${CRATE} = {/ s/version = \"[^\"]*\"/version = \"${NEW_VERSION}\"/" Cargo.toml
+fi
+
 TODAY="$(date -u +%Y-%m-%d)"
 if [[ "$CRATE" == "synapse-gateway" ]]; then
   sed -i "/^## \[Unreleased\]/a\\
@@ -87,7 +94,7 @@ fi
 
 cargo check -p "$CRATE" -q
 
-git add "$CARGO_TOML" Cargo.lock "$CHANGELOG"
+git add Cargo.toml "$CARGO_TOML" Cargo.lock "$CHANGELOG"
 git commit -m "chore(${CRATE}): release v${NEW_VERSION}"
 git tag "$TAG"
 git push origin HEAD:main "$TAG"
