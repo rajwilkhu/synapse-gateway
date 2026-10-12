@@ -11,3 +11,4 @@ docs/.docusaurus/
 service-account.json
 .superpowers
 .DS_Store
+.axonal/
