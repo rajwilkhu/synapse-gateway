@@ -4085,7 +4085,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-a2a"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "axum",

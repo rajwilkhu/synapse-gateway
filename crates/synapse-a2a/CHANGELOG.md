@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.3
+
 - Relicensed from AGPL-3.0-only to MPL-2.0 (Mozilla Public License 2.0).
 
 ## 0.2.2
