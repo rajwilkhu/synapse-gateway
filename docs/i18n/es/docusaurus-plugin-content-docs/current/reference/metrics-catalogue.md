@@ -81,11 +81,13 @@ cuentan las peticiones con éxito, y la duración cubre únicamente el tramo que
 
 | Métrica | Tipo | Unidad | Etiquetas |
 |---|---|---|---|
-| `synapse_guard_scans_total` | Counter | escaneos | `policy`, `outcome` |
-| `synapse_guard_matches_total` | Counter | coincidencias | `policy`, `scanner`, `severity` |
-| `synapse_guard_scan_duration_seconds` | Histogram | segundos | `policy` |
+| `synapse_guard_scans_total` | Counter | escaneos | `lane`, `policy`, `outcome` |
+| `synapse_guard_matches_total` | Counter | coincidencias | `lane`, `policy`, `scanner`, `severity` |
+| `synapse_guard_scan_duration_seconds` | Histogram | segundos | `lane`, `policy` |
 
-`outcome` es `pass`, `flag`, `block` u `observe`; `severity` es `block`, `warn` o `info`.
+`lane` es `chat`, `passthrough`, `embeddings` o `jev`, un conjunto de valores distinto del de
+la etiqueta `lane` de `synapse_requests_total` (`standard`, `native` o `jev`). `outcome` es
+`pass`, `flag`, `block` u `observe`; `severity` es `block`, `warn` o `info`.
 Consulta [Política de guardrails](../configuration/guardrails-policy.md#metrics).
 
 ### Registro de costes {#cost-ledger}

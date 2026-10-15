@@ -42,7 +42,7 @@ for Cargo features and ledger backends, and
 
 ## Example
 
-Save a route and its prices:
+Save a route, its prices and a guardrails policy:
 
 ```toml
 # config/routes.toml
@@ -55,6 +55,12 @@ legs = [
 ```toml
 # config/pricing.toml
 "vertex:gemini-3.5-flash-lite" = { input = 0.30, output = 2.50 }
+```
+
+```toml
+# config/guardrails.toml
+[guardrails.default]
+scanners = ["prompt_injection", "secrets"]
 ```
 
 Start the gateway with Application Default Credentials for Vertex AI, then send a request:

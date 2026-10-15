@@ -25,14 +25,15 @@ más reciente y `edge` para la punta de `main`. Las imágenes solo se construyen
 La imagen:
 
 - escucha en el puerto `8080` para la API y en el puerto `9090` para las métricas de
-  Prometheus;
+  Prometheus, y sirve los endpoints de administración de A2A en `127.0.0.1:8081`, el loopback
+  del propio contenedor (consulta [Docker](../deployment/docker.md#ports));
 - se ejecuta como el usuario no root `synapse` (UID 1001), que no tiene directorio home;
 - usa `/app` como directorio de trabajo y lee la configuración de `/app/config`;
 - incluye todos los backends del registro (SQLite, Postgres, Pub/Sub y SNS).
 
 La imagen incluye la configuración por defecto de
 [`crates/synapse-gateway/config/`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/config).
-Monta tu propio directorio sobre `/app/config` para aportar tus rutas y precios:
+Monta tu propio directorio sobre `/app/config` para aportar tus rutas, precios y guardrails:
 
 ```bash
 docker run --rm -p 8080:8080 -p 9090:9090 \

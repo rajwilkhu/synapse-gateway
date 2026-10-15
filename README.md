@@ -25,7 +25,7 @@ reverse-proxy sidecar, an A2A agent registry and an on-demand MCP gateway.
 
 ## Quick start
 
-Save a route and its prices in a `config/` folder:
+Save a route, its prices and a guardrails policy in a `config/` folder:
 
 ```toml
 # config/routes.toml
@@ -38,6 +38,12 @@ legs = [
 ```toml
 # config/pricing.toml
 "vertex:gemini-3.5-flash-lite" = { input = 0.30, output = 2.50 }
+```
+
+```toml
+# config/guardrails.toml
+[guardrails.default]
+scanners = ["prompt_injection", "secrets"]
 ```
 
 Start the gateway with a Google Cloud service-account key (`sa.json`) that can call Vertex AI,

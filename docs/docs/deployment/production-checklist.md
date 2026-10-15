@@ -79,9 +79,12 @@ that explains the setting in full.
 - [ ] **Set the tenant at the proxy.** Clients can send any `x-synapse-tenant`. If
   attribution matters, have your proxy set the header from the authenticated identity,
   overwriting the client's value. See [Tenant attribution](../guides/tenant-attribution.md).
-- [ ] **Block the internal endpoints.** The A2A registry's admin endpoints,
-  `POST /internal/a2a/agents` and `DELETE /internal/a2a/agents/{id}`, are served on the API
-  port without authentication. Don't route `/internal/` from outside your network.
+- [ ] **Block the internal endpoints.** The A2A registry's admin endpoints, `POST
+  /internal/a2a/agents` and `DELETE /internal/a2a/agents/{id}`, are served on
+  `SYNAPSE_ADMIN_ADDR`. Keep it unset (loopback) or reachable only from agent hosts; avoid
+  `shared`.
+- [ ] **Guard every lane.** Define a `default` policy or a policy per route and embedding
+  alias. Keep `SYNAPSE_GUARDRAILS=required` and `SYNAPSE_PASSTHROUGH_MODELS=routed`.
 - [ ] **Configure guardrails.** Add a `guardrails.toml` with a `default` policy, rolled out in
   `observe` mode first, so prompt injection, secrets and personal data are caught before they
   reach a provider. See [Guardrails policy](../configuration/guardrails-policy.md).

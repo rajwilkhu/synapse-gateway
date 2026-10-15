@@ -10,9 +10,11 @@ clients discover them through a catalogue, fetch their agent cards, and resolve 
 to the URL where it serves A2A. The registry stores what it is given and hands it back: it
 doesn't proxy A2A traffic.
 
-The [synapse-gateway](https://crates.io/crates/synapse-gateway) binary serves the registry on
-its API port (default `:8080`), seeded from `a2a.toml` when that file exists. This crate lets
-you serve the same endpoints from your own axum application.
+The [synapse-gateway](https://crates.io/crates/synapse-gateway) binary serves the registry,
+seeded from `a2a.toml` when that file exists. The public routes are on its API port (default
+`:8080`) and the admin routes on `SYNAPSE_ADMIN_ADDR` (default `127.0.0.1:8081`; `shared`
+serves them on the API port). This crate lets you serve the same endpoints from your own axum
+application.
 
 **Full documentation:** https://synapse-gateway.readthedocs.io/en/latest/docs/synapse-family/a2a/overview/
 

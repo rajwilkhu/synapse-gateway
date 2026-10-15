@@ -170,6 +170,9 @@ Gemini-native passthrough endpoints, `POST /v1beta/models/<model>:<action>`,
 forwards the body verbatim to Vertex AI with its own credentials, meters `generateContent`
 and `streamGenerateContent` calls in the ledger, and on a connection error or a `5xx`, `429`
 or `408` response tries the following `vertex` legs of the route that lists that model.
-Guardrails don't scan these requests, and a model that no route lists is still forwarded.
+`generateContent` and `streamGenerateContent` requests are scanned under the matched route's
+policy, else `default`; see [What is scanned](../configuration/guardrails-policy.md#what-is-scanned).
+`<model>` may be a route alias, which selects that route's legs and policy. A model that no
+route lists gets `404` unless `SYNAPSE_PASSTHROUGH_MODELS=any`.
 See [Gemini passthrough](../reference/http-api.md#gemini-passthrough) for the full
 behaviour, including timeouts.

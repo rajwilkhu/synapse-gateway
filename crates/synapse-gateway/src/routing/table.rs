@@ -218,6 +218,17 @@ impl RouteTable {
         self.policies.get(model).map(String::as_str)
     }
 
+    /// Every `(alias, policy)` pair a route names, sorted by alias.
+    pub fn route_policies(&self) -> Vec<(&str, &str)> {
+        let mut v: Vec<(&str, &str)> = self
+            .policies
+            .iter()
+            .map(|(a, p)| (a.as_str(), p.as_str()))
+            .collect();
+        v.sort();
+        v
+    }
+
     /// All registered aliases (for `/v1/models`), sorted for stable output.
     pub fn aliases(&self) -> Vec<String> {
         let mut v: Vec<String> = self.routes.keys().cloned().collect();
@@ -309,8 +320,21 @@ impl RouteTable {
     /// non-vertex leg. If nothing matches, return a single synthetic leg so
     /// callers always have ≥1 attempt (same as today's single forward).
     /// `jev` routes never take part: their legs span difficulty tiers, not
-    /// fallbacks for one model.
+    /// fallbacks for one model. A `model` that is the alias of a non-`jev` route
+    /// resolves to that route's leading Vertex legs, which may be none.
     pub fn vertex_fallback_chain(&self, model: &str) -> VertexPassthroughChain {
+        if !self.jev_declared.contains(model) {
+            if let Some(legs) = self.routes.get(model) {
+                return VertexPassthroughChain {
+                    route: Some(model.to_string()),
+                    legs: legs
+                        .iter()
+                        .take_while(|l| l.provider == "vertex")
+                        .cloned()
+                        .collect(),
+                };
+            }
+        }
         let mut aliases: Vec<&String> = self
             .routes
             .keys()
@@ -632,6 +656,89 @@ mod tests {
         assert_eq!(c.route, None);
         assert_eq!(c.legs.len(), 1);
         assert_eq!(c.legs[0].model, "totally-unknown");
+    }
+
+    #[test]
+    fn vertex_fallback_chain_prefers_an_exact_alias() {
+        let t = RouteTable::from_toml_str(
+            r#"
+            [routes."aaa"]
+            legs = [{ provider = "vertex", model = "gemini-x" }]
+            [routes."chat"]
+            policy = "strict"
+            legs = [
+              { provider = "vertex", model = "gemini-x", region = "us" },
+              { provider = "vertex", model = "gemini-y" },
+              { provider = "qwen", model = "qwen-max" },
+            ]
+        "#,
+        )
+        .unwrap();
+        let by_alias = t.vertex_fallback_chain("chat");
+        assert_eq!(by_alias.route.as_deref(), Some("chat"));
+        assert_eq!(
+            by_alias
+                .legs
+                .iter()
+                .map(|l| l.model.as_str())
+                .collect::<Vec<_>>(),
+            ["gemini-x", "gemini-y"]
+        );
+        assert_eq!(
+            t.vertex_fallback_chain("gemini-x").route.as_deref(),
+            Some("aaa")
+        );
+    }
+
+    #[test]
+    fn vertex_fallback_chain_alias_without_leading_vertex_legs_is_empty() {
+        let t = RouteTable::from_toml_str(
+            r#"[routes."typed"]
+               legs = [{ provider = "typesafe", model = "jev-latest" }, { provider = "vertex", model = "gemini-x" }]"#,
+        )
+        .unwrap();
+        let c = t.vertex_fallback_chain("typed");
+        assert_eq!(c.route.as_deref(), Some("typed"));
+        assert!(c.legs.is_empty());
+    }
+
+    #[test]
+    fn vertex_fallback_chain_never_resolves_a_jev_alias() {
+        let t = RouteTable::from_toml_str(
+            r#"
+            [routes."tiered"]
+            strategy = "jev"
+            [routes."tiered".jev_router]
+            default_tier = "standard"
+            [[routes."tiered".tiers]]
+            name = "standard"
+            description = "simple"
+            effort = "low"
+            legs = [{ provider = "vertex", model = "gemini-x" }]
+            [[routes."tiered".tiers]]
+            name = "hard"
+            description = "complex"
+            effort = "medium"
+            legs = [{ provider = "vertex", model = "gemini-y" }]
+        "#,
+        )
+        .unwrap();
+        assert_eq!(t.vertex_fallback_chain("tiered").route, None);
+    }
+
+    #[test]
+    fn route_policies_lists_alias_policy_pairs() {
+        let t = RouteTable::from_toml_str(
+            r#"
+            [routes."a"]
+            policy = "strict"
+            legs = [{ provider = "vertex", model = "m" }]
+            [routes."b"]
+            legs = [{ provider = "vertex", model = "m" }]
+        "#,
+        )
+        .unwrap();
+        assert_eq!(t.route_policies(), vec![("a", "strict")]);
     }
 
     fn tier(name: &str, effort: &str, provider: &str, model: &str) -> String {

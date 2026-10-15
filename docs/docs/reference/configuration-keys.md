@@ -17,7 +17,7 @@ doesn't know are ignored without an error, so a misspelled optional key silently
 |---|---|---|---|
 | `routes.toml` | `SYNAPSE_ROUTES_PATH` | `config/routes.toml` | The gateway doesn't start. |
 | `pricing.toml` | `SYNAPSE_PRICING_PATH` | `config/pricing.toml` | The gateway doesn't start. |
-| `guardrails.toml` | `SYNAPSE_GUARDRAILS_PATH` | `config/guardrails.toml` | Guardrails are off. |
+| `guardrails.toml` | `SYNAPSE_GUARDRAILS_PATH` | `config/guardrails.toml` | The gateway doesn't start, unless `SYNAPSE_GUARDRAILS=optional`, which runs with guardrails off. |
 | `ai_task_types.toml` | `SYNAPSE_AI_TASK_TYPES_PATH` | `config/ai_task_types.toml` | Every request records the AI task type `simple`. |
 | `a2a.toml` | `SYNAPSE_A2A_PATH` | `config/a2a.toml` | The A2A registry starts empty. |
 
@@ -81,6 +81,7 @@ See [Tier keys](../configuration/routes.md#tier-keys).
 |---|---|---|---|---|
 | `dimensions` | integer | Yes | — | Output vector size. Greater than 0. |
 | `legs` | array of leg tables | Yes | — | At least one leg. |
+| `policy` | string | No | the `default` policy | Guardrail policy name from `guardrails.toml`. |
 
 See [Embedding aliases](../configuration/routes.md#embedding-aliases).
 

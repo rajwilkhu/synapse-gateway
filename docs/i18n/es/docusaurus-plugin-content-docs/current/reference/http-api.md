@@ -4,13 +4,15 @@ title: API HTTP
 description: Todos los endpoints que sirve el binario del gateway, con sus formatos de petición y respuesta, los encabezados x-synapse-* y los códigos de error.
 ---
 
-El binario del gateway sirve dos listeners:
+El binario del gateway sirve tres listeners:
 
 - la **API**, en `SYNAPSE_ADDR` (por defecto `0.0.0.0:8080`), con todos los endpoints de esta
-  página salvo el de métricas;
-- el endpoint de **métricas**, en `SYNAPSE_METRICS_ADDR` (por defecto `0.0.0.0:9090`).
+  página salvo las métricas y los endpoints de administración de A2A;
+- el endpoint de **métricas**, en `SYNAPSE_METRICS_ADDR` (por defecto `0.0.0.0:9090`);
+- los endpoints de **administración de A2A**, `/internal/a2a/*`, en `SYNAPSE_ADMIN_ADDR` (por
+  defecto `127.0.0.1:8081`), o en la API con `shared`.
 
-Ambos hablan HTTP sin cifrar y ninguno autentica a los clientes; consulta
+Todos hablan HTTP sin cifrar y ninguno autentica a los clientes; consulta
 [Seguridad](../operating/security.md).
 
 ## Endpoints {#endpoints}
@@ -25,8 +27,8 @@ Ambos hablan HTTP sin cifrar y ninguno autentica a los clientes; consulta
 | `POST` | `/v1/models/{model}:{action}` | Passthrough nativo de Gemini a Vertex AI. |
 | `POST` | `/google/models/{model}:{action}` | Passthrough nativo de Gemini a Vertex AI. |
 | `POST` | `/typesafe/v1/systemone` | Passthrough de Jev a TypeSafe System One. |
-| `POST` | `/internal/a2a/agents` | Registra un agente A2A. |
-| `DELETE` | `/internal/a2a/agents/{id}` | Elimina un agente A2A. |
+| `POST` | `/internal/a2a/agents` | Registra un agente A2A (listener de administración, `SYNAPSE_ADMIN_ADDR`). |
+| `DELETE` | `/internal/a2a/agents/{id}` | Elimina un agente A2A (listener de administración, `SYNAPSE_ADMIN_ADDR`). |
 | `GET` | `/.well-known/a2a-agent-catalog.json` | Lista los agentes A2A registrados. |
 | `GET` | `/a2a/agents/{id}/.well-known/agent-card.json` | La agent card A2A de un agente. |
 | `GET` | `/a2a/agents/{id}/resolve` | El endpoint y la agent card de un agente. |
@@ -212,7 +214,7 @@ La respuesta es una `list` de OpenAI de objetos `embedding`, en el orden de la e
 versiones de la API que usan los SDK de Gemini de Google. El cuerpo es una petición de Gemini,
 que se reenvía tal cual a Vertex AI con las credenciales del gateway.
 
-- `{model}` es un nombre de modelo de Vertex AI, no un alias de ruta, y `{action}` es la parte
+- `{model}` es un alias de ruta o un nombre de modelo de Vertex AI, y `{action}` es la parte
   que va tras los últimos dos puntos, como `generateContent`, `streamGenerateContent` o
   `countTokens`.
 - `streamGenerateContent` con `?alt=sse` transmite la respuesta en streaming.
@@ -221,14 +223,19 @@ que se reenvía tal cual a Vertex AI con las credenciales del gateway.
   los siguientes tramos `vertex` de la ruta que lista el modelo; consulta
   [Clientes del SDK de Gemini](../guides/native-vertex.md#gemini-sdk-clients).
 - Las demás acciones se reenvían una sola vez, sin fila en el registro de costes.
-- Un modelo que ninguna ruta lista se reenvía igualmente, en un único intento.
+- Un modelo que ninguna ruta lista se reenvía en un único intento solo con
+  `SYNAPSE_PASSTHROUGH_MODELS=any`; por defecto recibe `404`.
 - Las llamadas con streaming (`?alt=sse`) pueden durar hasta una hora. Todas las demás están
   acotadas por `SYNAPSE_REQUEST_TIMEOUT_SECS`.
 - El estado y el cuerpo de Vertex AI se devuelven sin cambios. Un error de conexión en el último
   intento devuelve `502` con el código `upstream_error`. Si el gateway no tiene ningún proyecto
   de Vertex AI configurado, el endpoint devuelve `400`.
 
-Los guardrails no escanean las peticiones passthrough.
+Las peticiones de generación se escanean con la política de la ruta coincidente o, si no,
+`default` (consulta [Qué se escanea](../configuration/guardrails-policy.md#what-is-scanned)).
+Con `SYNAPSE_PASSTHROUGH_MODELS=routed` (el valor por defecto), un modelo que no es ni un alias
+de ruta ni un tramo `vertex` recibe `404`. Los errores del propio gateway en este endpoint usan
+la forma de error de Google.
 
 ## Passthrough de Jev {#jev-passthrough}
 
@@ -236,14 +243,17 @@ Los guardrails no escanean las peticiones passthrough.
 One con la `TYPESAFE_API_KEY` del gateway. El cuerpo debe ser un objeto JSON; si no tiene
 `model`, el gateway fija `jev-latest`. El estado y el cuerpo de TypeSafe se devuelven sin
 cambios, y el uso se anota en el registro de costes con el carril `passthrough`. Sin
-`TYPESAFE_API_KEY`, el endpoint devuelve `400`. Consulta
+`TYPESAFE_API_KEY`, el endpoint devuelve `400`. Las peticiones se escanean con la política
+`default`. Consulta
 [Passthrough de Jev](../guides/jev-lane.md#jev-passthrough).
 
 ## Registro de agentes A2A {#a2a-agent-registry}
 
 El binario del gateway sirve un registro en memoria de agentes A2A, cargado al arrancar desde
-`a2a.toml` (consulta [Claves de configuración](./configuration-keys.md#a2atoml)). Cada instancia
-del gateway tiene su propio registro.
+`a2a.toml` (consulta [Claves de configuración](./configuration-keys.md#a2atoml)). Cada
+instancia del gateway tiene su propio registro. Los endpoints de administración se sirven en
+`SYNAPSE_ADMIN_ADDR` (por defecto `127.0.0.1:8081`), no en el puerto de la API, salvo que se
+configure como `shared`.
 
 ### `POST /internal/a2a/agents` {#post-internala2aagents}
 

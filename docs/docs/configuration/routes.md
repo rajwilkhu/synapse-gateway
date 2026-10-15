@@ -239,3 +239,27 @@ effect.
 
 Provider credentials are checked after the file loads; see
 [Providers](providers.md#strict-and-lenient-validation).
+
+## Embedding policy
+
+An embedding alias can name a guardrails policy. Without it, embeddings use `default`:
+
+```toml title="config/routes.toml"
+[routes."chat"]
+legs = [{ provider = "vertex", model = "gemini-3.5-flash-lite", region = "us" }]
+
+[embeddings."docs-embed"]
+dimensions = 768
+policy = "embeddings"
+legs = [{ provider = "vertex", model = "text-embedding-004" }]
+```
+
+The named policy must be defined in `guardrails.toml`; under the default
+`SYNAPSE_GUARDRAILS=required` the gateway refuses to start otherwise.
+
+## Gemini passthrough by alias
+
+A Gemini SDK client can name a route alias as its model. The gateway walks that route's
+leading `vertex` legs, sends each leg's own model to Vertex, and scans under the route's
+policy. `strategy = "jev"` routes are not available on the passthrough. An alias whose route
+has no leading `vertex` legs gets `400`.

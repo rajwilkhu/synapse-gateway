@@ -25,12 +25,14 @@ synapse-compose/
 ├── sa.json          # clave de cuenta de servicio de Google Cloud
 └── config/
     ├── routes.toml
-    └── pricing.toml
+    ├── pricing.toml
+    └── guardrails.toml
 ```
 
-Copia `config/routes.toml` y `config/pricing.toml` del
+Copia `config/routes.toml`, `config/pricing.toml` y `config/guardrails.toml` del
 [inicio rápido](../get-started/quickstart.md#create-the-configuration). Definen las rutas
-`gemini-flash` y `chat`, servidas por Vertex AI con fallback a OpenAI.
+`gemini-flash` y `chat`, servidas por Vertex AI con fallback a OpenAI, y la política de
+guardrails `default` que las escanea. El gateway no arranca sin `guardrails.toml`.
 
 Guarda el stack como `compose.yaml` y sustituye `my-gcp-project` por tu proyecto de Google
 Cloud:
@@ -106,7 +108,9 @@ Qué configura el stack:
   está sano, porque un destino del registro de costes que no puede conectar al arrancar se
   omite durante toda la vida del proceso. `platform: linux/amd64` permite ejecutar la imagen en
   Apple silicon; `init: true` le permite pararse enseguida. `NO_COLOR` mantiene los códigos de
-  color fuera de los logs.
+  color fuera de los logs. Publica los puertos de la API (`8080`) y de métricas (`9090`); los
+  endpoints de administración de A2A se quedan en el loopback del contenedor,
+  `127.0.0.1:8081` (consulta [Docker](docker.md#ports)).
 - **`postgres`** guarda el registro de costes en el volumen `ledger`, así que sobrevive a
   `docker compose down`. Cambia la contraseña antes de usar el stack para algo real.
 - **`prometheus`** recoge las métricas del puerto de métricas del gateway cada 15 segundos con
@@ -189,7 +193,7 @@ docker compose down -v     # borra también el registro de costes
 - Añade un destino Pub/Sub o SNS junto a Postgres, con
   `SYNAPSE_LEDGER_BACKENDS: postgres,pubsub` y las variables de
   [Registro de costes](../configuration/environment-variables.md#ledger).
-- Añade guardrails colocando un `guardrails.toml` en `config/`; consulta
-  [Política de guardrails](../configuration/guardrails-policy.md).
+- Ajusta los escáneres de `config/guardrails.toml` y asigna políticas propias a las rutas;
+  consulta [Política de guardrails](../configuration/guardrails-policy.md).
 - Recorre la [lista de comprobación para producción](production-checklist.md) antes de exponer
   el gateway a tráfico real.

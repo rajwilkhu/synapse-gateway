@@ -13,6 +13,7 @@ reinícialo después de cualquier cambio.
 | Variable | Valor por defecto | Descripción |
 |---|---|---|
 | `SYNAPSE_ADDR` | `0.0.0.0:8080` | Dirección y puerto de la API: todos los endpoints HTTP excepto las métricas. |
+| `SYNAPSE_ADMIN_ADDR` | `127.0.0.1:8081` | Dirección y puerto de los endpoints de administración de A2A, `/internal/a2a/*`. `shared` los sirve en `SYNAPSE_ADDR`. Los endpoints de administración no tienen autenticación: mantén esta dirección privada. |
 | `SYNAPSE_METRICS_ADDR` | `0.0.0.0:9090` | Dirección y puerto del endpoint de Prometheus, `GET /metrics`. Debe ser una dirección IP y un puerto; un nombre de host hace fallar el arranque. |
 
 ## Archivos de configuración {#configuration-files}
@@ -24,15 +25,17 @@ Docker es `/app`, así que los valores por defecto apuntan a los archivos de `/a
 |---|---|---|
 | `SYNAPSE_ROUTES_PATH` | `config/routes.toml` | Alias de ruta, sus tramos y niveles. Obligatorio: el gateway no arranca sin él. Consulta [Rutas](routes.md). |
 | `SYNAPSE_PRICING_PATH` | `config/pricing.toml` | Precios por `provider:model`, usados para calcular el coste de las filas del registro de costes. Obligatorio. Consulta [Precios](pricing.md). |
-| `SYNAPSE_GUARDRAILS_PATH` | `config/guardrails.toml` | Políticas de guardrails. Opcional: sin el archivo, los guardrails están desactivados. Consulta [Política de guardrails](guardrails-policy.md). |
+| `SYNAPSE_GUARDRAILS_PATH` | `config/guardrails.toml` | Políticas de guardrails. Obligatorio salvo con `SYNAPSE_GUARDRAILS=optional`. Consulta [Política de guardrails](guardrails-policy.md). |
 | `SYNAPSE_AI_TASK_TYPES_PATH` | `config/ai_task_types.toml` | Asigna los alias de ruta al tipo de tarea de IA que se registra en las filas del registro de costes. Opcional: sin el archivo, todas las peticiones registran `simple`. Consulta [Tipos de tarea de IA](../guides/tenant-attribution.md#ai-task-types). |
-| `SYNAPSE_A2A_PATH` | `config/a2a.toml` | Archivo semilla del registro de agentes A2A en memoria que se sirve en el puerto de la API. Opcional: sin el archivo, el registro empieza vacío. |
+| `SYNAPSE_A2A_PATH` | `config/a2a.toml` | Archivo semilla del registro de agentes A2A en memoria que se sirve en el puerto de la API (rutas públicas) y en `SYNAPSE_ADMIN_ADDR` (rutas de administración). Opcional: sin el archivo, el registro empieza vacío. |
 
 ## Proveedores {#providers}
 
 | Variable | Valor por defecto | Descripción |
 |---|---|---|
 | `SYNAPSE_PROVIDER_VALIDATION` | `strict` | Qué hacer cuando una ruta hace referencia a un proveedor que este proceso no puede construir, porque su credencial no está definida o el id es desconocido. `strict` se niega a arrancar. `lenient` descarta esos tramos, elimina las rutas que se quedan sin tramos y arranca. Cualquier valor distinto de `lenient` equivale a `strict`. |
+| `SYNAPSE_GUARDRAILS` | `required` | `required` se niega a arrancar cuando falta el archivo de guardrails, o cuando una ruta o un alias de embeddings nombra una política que el archivo no define. `optional` arranca con los guardrails desactivados cuando falta el archivo, y registra un aviso por cada política no definida. Cualquier valor distinto de `optional` equivale a `required`. |
+| `SYNAPSE_PASSTHROUGH_MODELS` | `routed` | `routed` hace que el passthrough de Gemini reenvíe solo un alias de ruta o un modelo que sea un tramo `vertex` de una ruta; cualquier otro recibe `404`. `any` reenvía los modelos desconocidos como un único tramo. Cualquier valor distinto de `any` equivale a `routed`. |
 
 Cada proveedor lee sus propias variables de credencial y de endpoint. La tabla las enumera;
 consulta [Proveedores](providers.md) para saber cuáles son obligatorias y cómo las trata la

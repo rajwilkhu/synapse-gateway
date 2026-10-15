@@ -13,6 +13,7 @@ change.
 | Variable | Default | Description |
 |---|---|---|
 | `SYNAPSE_ADDR` | `0.0.0.0:8080` | Address and port of the API: every HTTP endpoint except metrics. |
+| `SYNAPSE_ADMIN_ADDR` | `127.0.0.1:8081` | Address and port of the A2A admin endpoints, `/internal/a2a/*`. `shared` serves them on `SYNAPSE_ADDR` instead. The admin endpoints have no authentication: keep this address private. |
 | `SYNAPSE_METRICS_ADDR` | `0.0.0.0:9090` | Address and port of the Prometheus endpoint, `GET /metrics`. Must be an IP address and port; a host name fails at startup. |
 
 ## Configuration files
@@ -24,15 +25,17 @@ Relative paths resolve against the gateway's working directory. In the Docker im
 |---|---|---|
 | `SYNAPSE_ROUTES_PATH` | `config/routes.toml` | Route aliases, their legs and tiers. Required: the gateway does not start without it. See [Routes](routes.md). |
 | `SYNAPSE_PRICING_PATH` | `config/pricing.toml` | Prices per `provider:model`, used to cost ledger rows. Required. See [Pricing](pricing.md). |
-| `SYNAPSE_GUARDRAILS_PATH` | `config/guardrails.toml` | Guardrail policies. Optional: without the file, guardrails are off. See [Guardrails policy](guardrails-policy.md). |
+| `SYNAPSE_GUARDRAILS_PATH` | `config/guardrails.toml` | Guardrail policies. Required unless `SYNAPSE_GUARDRAILS=optional`. See [Guardrails policy](guardrails-policy.md). |
 | `SYNAPSE_AI_TASK_TYPES_PATH` | `config/ai_task_types.toml` | Maps route aliases to the AI task type recorded on ledger rows. Optional: without the file, every request records `simple`. See [AI task types](../guides/tenant-attribution.md#ai-task-types). |
-| `SYNAPSE_A2A_PATH` | `config/a2a.toml` | Seed file for the in-memory A2A agent registry served on the API port. Optional: without the file, the registry starts empty. |
+| `SYNAPSE_A2A_PATH` | `config/a2a.toml` | Seed file for the in-memory A2A agent registry served on the API port (public routes) and `SYNAPSE_ADMIN_ADDR` (admin routes). Optional: without the file, the registry starts empty. |
 
 ## Providers
 
 | Variable | Default | Description |
 |---|---|---|
 | `SYNAPSE_PROVIDER_VALIDATION` | `strict` | What to do when a route references a provider this process cannot build, because its credential is unset or the id is unknown. `strict` refuses to start. `lenient` drops those legs, removes routes left with no legs, and starts. Any value other than `lenient` means `strict`. |
+| `SYNAPSE_GUARDRAILS` | `required` | `required` refuses to start when the guardrails file is missing, or when a route or embedding alias names a policy the file does not define. `optional` starts with guardrails off when the file is missing, and logs a warning for each undefined policy. Any value other than `optional` means `required`. |
+| `SYNAPSE_PASSTHROUGH_MODELS` | `routed` | `routed` makes the Gemini passthrough forward only a route alias or a model that is a `vertex` leg of a route; anything else gets `404`. `any` forwards unknown models as a single leg. Any value other than `any` means `routed`. |
 
 Each provider reads its own credential and endpoint variables. The table lists them; see
 [Providers](providers.md) for which are required and how validation treats them.

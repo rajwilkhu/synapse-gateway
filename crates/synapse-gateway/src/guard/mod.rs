@@ -3,6 +3,9 @@
 pub mod engine;
 pub mod policy;
 pub mod scanners;
+pub mod segments;
+pub mod validate;
 
-pub use engine::GuardEngine;
+pub use engine::{GuardEngine, GuardLane};
 pub use policy::GuardrailsConfig;
+pub use validate::validate_guardrails;

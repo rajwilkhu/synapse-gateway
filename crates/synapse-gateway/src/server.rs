@@ -41,6 +41,22 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .with_state(AppState { gateway })
 }
 
+/// The API app (gateway plus public A2A routes) and, unless `shared_admin`
+/// merges them into it, a separate app for the A2A admin routes.
+pub fn apps(
+    gateway: Arc<Gateway>,
+    registry: Arc<synapse_a2a::A2aRegistry>,
+    shared_admin: bool,
+) -> (Router, Option<Router>) {
+    let api = router(gateway).merge(synapse_a2a::a2a_public_router(registry.clone()));
+    let admin = synapse_a2a::a2a_admin_router(registry);
+    if shared_admin {
+        (api.merge(admin), None)
+    } else {
+        (api, Some(admin))
+    }
+}
+
 fn request_ctx(headers: &HeaderMap) -> RequestCtx {
     let header = |name: &str| {
         headers
@@ -131,15 +147,94 @@ async fn embeddings(
     Ok(Json(resp).into_response())
 }
 
-/// Gemini-native passthrough (`POST .../models/{model}:{action}`): forward the
-/// request to Vertex via the native provider and meter usage from the
-/// response's `usageMetadata`. Lets Gemini SDK clients (`GOOGLE_VERTEX_BASE_URL`)
-/// route through the gateway without translating to the OpenAI surface.
-///
-/// Generation actions walk consecutive Vertex legs from `routes.toml` on
-/// 429/5xx (see `RouteTable::vertex_fallback_chain`). Non-generation actions
-/// remain a single forward.
+/// Gemini-native passthrough (`POST .../models/{model}:{action}`). The
+/// gateway's own errors use Google's error shape; upstream responses pass
+/// through unchanged.
 async fn gemini_passthrough(
+    state: State<AppState>,
+    model_action: axum::extract::Path<String>,
+    query: axum::extract::RawQuery,
+    headers: HeaderMap,
+    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return gemini_error(GatewayError::BadRequest(rejection.body_text())),
+    };
+    forward_gemini(state, model_action, query, headers, body)
+        .await
+        .unwrap_or_else(gemini_error)
+}
+
+fn gemini_error(e: GatewayError) -> Response {
+    let status = e.status();
+    let (reason, metadata, message) = match &e {
+        GatewayError::ContentBlocked { policy, scanners } => (
+            "CONTENT_BLOCKED".to_string(),
+            json!({ "policy": policy, "scanners": scanners.join(",") }),
+            format!(
+                "Request blocked by content policy '{policy}' (scanners: {})",
+                scanners.join(", ")
+            ),
+        ),
+        GatewayError::UnknownModel(model) => (
+            "UNKNOWN_MODEL".to_string(),
+            json!({ "model": model }),
+            e.to_string(),
+        ),
+        other => (
+            other.code().to_ascii_uppercase(),
+            json!({}),
+            other.to_string(),
+        ),
+    };
+    let body = json!({ "error": {
+        "code": status.as_u16(),
+        "status": google_status(status),
+        "message": message,
+        "details": [{
+            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+            "reason": reason,
+            "domain": "synapse-gateway",
+            "metadata": metadata,
+        }],
+    }});
+    (status, Json(body)).into_response()
+}
+
+fn google_status(status: axum::http::StatusCode) -> &'static str {
+    match status.as_u16() {
+        400 => "INVALID_ARGUMENT",
+        404 => "NOT_FOUND",
+        429 => "RESOURCE_EXHAUSTED",
+        503 => "UNAVAILABLE",
+        504 => "DEADLINE_EXCEEDED",
+        _ => "INTERNAL",
+    }
+}
+
+/// Rejects a path model outside `[A-Za-z0-9._-]+` or an action outside
+/// `[A-Za-z]+`, so neither can change the upstream URL's path or query.
+fn check_model_action(model: &str, action: &str) -> Result<(), GatewayError> {
+    let model_ok = !model.is_empty()
+        && model
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    let action_ok = !action.is_empty() && action.chars().all(|c| c.is_ascii_alphabetic());
+    if model_ok && action_ok {
+        Ok(())
+    } else {
+        Err(GatewayError::BadRequest(format!(
+            "invalid model or action in models/{model}:{action}"
+        )))
+    }
+}
+
+/// Forwards the request to Vertex via the native provider and meters usage
+/// from the response's `usageMetadata`. Generation actions walk consecutive
+/// Vertex legs from `routes.toml` on 429/5xx (see
+/// `RouteTable::vertex_fallback_chain`); other actions are a single forward.
+async fn forward_gemini(
     State(st): State<AppState>,
     axum::extract::Path(model_action): axum::extract::Path<String>,
     axum::extract::RawQuery(query): axum::extract::RawQuery,
@@ -163,19 +258,38 @@ async fn gemini_passthrough(
             "expected models/{{model}}:{{action}}, got '{model_action}'"
         ))
     })?;
+    check_model_action(model, action)?;
     let alt_sse = query.as_deref().is_some_and(|q| q.contains("alt=sse"));
     let streaming = action == "streamGenerateContent";
     let metered = action == "generateContent" || streaming;
 
+    let chain = st.gateway.routes.vertex_fallback_chain(model);
+    if chain.route.is_none()
+        && st.gateway.passthrough_models == crate::config::PassthroughModels::Routed
+    {
+        return Err(GatewayError::UnknownModel(model.to_string()));
+    }
+    let Some(first_leg) = chain.legs.first().cloned() else {
+        return Err(GatewayError::BadRequest(format!(
+            "route '{model}' has no leading vertex legs for the gemini passthrough"
+        )));
+    };
+
     // countTokens etc.: pure single forward, no chain / metering.
     if !metered {
         let resp = provider
-            .passthrough_request(model, action, false, body, None)
+            .passthrough_request(
+                &first_leg.model,
+                action,
+                false,
+                body,
+                first_leg.region.as_deref(),
+            )
             .await?;
         let status = resp.status();
         st.gateway
             .metrics
-            .passthrough("vertex", model, action, status.is_success());
+            .passthrough("vertex", &first_leg.model, action, status.is_success());
         let bytes = resp.bytes().await.map_err(|e| GatewayError::Upstream {
             status: 502,
             body: e.to_string(),
@@ -183,7 +297,16 @@ async fn gemini_passthrough(
         return passthrough_response(status.as_u16(), "application/json", bytes);
     }
 
-    let chain = st.gateway.routes.vertex_fallback_chain(model);
+    let policy = chain
+        .route
+        .as_deref()
+        .and_then(|r| st.gateway.routes.policy_of(r));
+    st.gateway.guard_lane(
+        policy,
+        crate::guard::GuardLane::Passthrough,
+        &crate::guard::segments::gemini_segments(&body),
+    )?;
+
     let ctx = request_ctx(&headers);
     let route_alias = chain.route.as_deref();
     let mut prev_model: Option<String> = None;
@@ -322,6 +445,11 @@ async fn jev_passthrough(
         .as_str()
         .unwrap_or(crate::jev_native::DEFAULT_MODEL)
         .to_string();
+    st.gateway.guard_lane(
+        None,
+        crate::guard::GuardLane::Jev,
+        &crate::guard::segments::jev_segments(&body),
+    )?;
 
     let ctx = request_ctx(&headers);
     let mut guard =

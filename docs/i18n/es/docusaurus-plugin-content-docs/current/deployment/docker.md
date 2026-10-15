@@ -14,7 +14,7 @@ Prometheus, consulta [Docker Compose](docker-compose.md).
 
 | Imagen | Binario | Puertos | Se ejecuta como |
 |---|---|---|---|
-| `sustentabilitas/synapse-gateway` | `synapse-gateway` | `8080` API, `9090` métricas de Prometheus | `synapse` (UID 1001) |
+| `sustentabilitas/synapse-gateway` | `synapse-gateway` | `8080` API, `9090` métricas de Prometheus, `8081` administración de A2A (loopback del contenedor) | `synapse` (UID 1001) |
 | `sustentabilitas/synapse-proxy` | `synapse-proxy` | `8787` tráfico del proxy, `9090` métricas de Prometheus | `synapse` (UID 1001) |
 
 Cada versión se etiqueta con su número de versión (por ejemplo
@@ -76,8 +76,8 @@ La imagen incluye la configuración de ejemplo de
 [`crates/synapse-gateway/config/`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/config),
 que hace referencia a proveedores para los que quizá no tengas credenciales. Monta siempre tu
 propio directorio sobre `/app/config`. El montaje sustituye el directorio entero, así que solo
-se usan los archivos que proporcionas: si no incluyes `guardrails.toml`, los guardrails quedan
-desactivados.
+se usan los archivos que proporcionas: si no incluyes `guardrails.toml`, el gateway se niega a
+arrancar, salvo con `SYNAPSE_GUARDRAILS=optional`, que desactiva los guardrails.
 
 Para guardar los archivos en otro lugar del contenedor, define `SYNAPSE_ROUTES_PATH`,
 `SYNAPSE_PRICING_PATH` y las demás variables de ruta que se enumeran en
@@ -148,6 +148,13 @@ variables de conexión.
 solo sirve métricas de Prometheus, en `/metrics` y `/`; todos los demás endpoints, incluido
 `/health`, están en el puerto de la API. Publica el puerto de métricas solo en tu red de
 monitorización.
+
+`SYNAPSE_ADMIN_ADDR` (por defecto `127.0.0.1:8081`) sirve los endpoints de administración de
+A2A. Dentro de un contenedor, `127.0.0.1` es el loopback del propio contenedor, así que nada
+fuera de él puede alcanzarlos. Para que los hosts de agentes puedan registrarse, define
+`SYNAPSE_ADMIN_ADDR=0.0.0.0:8081` y publica ese puerto solo a ellos, o define
+`SYNAPSE_ADMIN_ADDR=shared` para servir los endpoints en el puerto de la API. Consulta
+[Seguridad](../operating/security.md#the-a2a-admin-endpoints-are-open).
 
 ### Parada {#stopping}
 

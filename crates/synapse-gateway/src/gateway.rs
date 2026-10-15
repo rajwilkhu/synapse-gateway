@@ -47,6 +47,8 @@ pub struct Gateway {
         std::collections::HashMap<String, Arc<dyn crate::embeddings::EmbeddingProvider>>,
     pub(crate) embed_default_input_per_mtok: f64,
     pub(crate) guard: Arc<GuardEngine>,
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) passthrough_models: crate::config::PassthroughModels,
     pub(crate) ai_task_types: Arc<crate::ai_task_type::AiTaskTypeTable>,
     pub(crate) metrics: Arc<GatewayMetrics>,
 }
@@ -174,6 +176,7 @@ pub struct GatewayBuilder {
         Option<std::collections::HashMap<String, Arc<dyn crate::embeddings::EmbeddingProvider>>>,
     embed_default_input_per_mtok: Option<f64>,
     guard: Option<GuardEngine>,
+    passthrough_models: Option<crate::config::PassthroughModels>,
     ai_task_types: Option<crate::ai_task_type::AiTaskTypeTable>,
     metrics: Option<Arc<GatewayMetrics>>,
 }
@@ -193,6 +196,17 @@ impl Gateway {
     pub(crate) fn guard_input(&self, req: &ChatRequest) -> Result<(), GatewayError> {
         let policy = self.routes.policy_of(&req.model).unwrap_or("default");
         self.guard.guard(policy, req)
+    }
+
+    /// Scan a lane's text under `policy`, else `default`.
+    pub(crate) fn guard_lane(
+        &self,
+        policy: Option<&str>,
+        lane: crate::guard::GuardLane,
+        segments: &[String],
+    ) -> Result<(), GatewayError> {
+        self.guard
+            .guard_segments(policy.unwrap_or("default"), lane, segments)
     }
 
     pub(crate) fn tenant_of<'a>(&'a self, ctx: &'a RequestCtx) -> &'a str {
@@ -702,6 +716,11 @@ impl Gateway {
             }
         }
         let inputs = req.input.into_vec();
+        self.guard_lane(
+            self.embed_routes.policy_of(&alias),
+            crate::guard::GuardLane::Embeddings,
+            &inputs,
+        )?;
         let legs = self
             .embed_routes
             .legs(&alias)
@@ -910,6 +929,11 @@ impl GatewayBuilder {
         self.guard = Some(guard);
         self
     }
+    /// Which models the Gemini passthrough forwards. Defaults to `Routed`.
+    pub fn passthrough_models(mut self, m: crate::config::PassthroughModels) -> Self {
+        self.passthrough_models = Some(m);
+        self
+    }
     pub fn ai_task_types(mut self, t: crate::ai_task_type::AiTaskTypeTable) -> Self {
         self.ai_task_types = Some(t);
         self
@@ -952,6 +976,7 @@ impl GatewayBuilder {
                     .unwrap_or_else(GuardEngine::empty)
                     .with_metrics(metrics.clone()),
             ),
+            passthrough_models: self.passthrough_models.unwrap_or_default(),
             ai_task_types: Arc::new(self.ai_task_types.unwrap_or_default()),
             metrics,
         })

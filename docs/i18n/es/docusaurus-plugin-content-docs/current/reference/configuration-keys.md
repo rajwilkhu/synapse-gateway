@@ -18,7 +18,7 @@ tiene ningún efecto sin que nada te avise.
 |---|---|---|---|
 | `routes.toml` | `SYNAPSE_ROUTES_PATH` | `config/routes.toml` | El gateway no arranca. |
 | `pricing.toml` | `SYNAPSE_PRICING_PATH` | `config/pricing.toml` | El gateway no arranca. |
-| `guardrails.toml` | `SYNAPSE_GUARDRAILS_PATH` | `config/guardrails.toml` | Los guardrails quedan desactivados. |
+| `guardrails.toml` | `SYNAPSE_GUARDRAILS_PATH` | `config/guardrails.toml` | El gateway no arranca, salvo con `SYNAPSE_GUARDRAILS=optional`, que arranca con los guardrails desactivados. |
 | `ai_task_types.toml` | `SYNAPSE_AI_TASK_TYPES_PATH` | `config/ai_task_types.toml` | Todas las peticiones registran el tipo de tarea de IA `simple`. |
 | `a2a.toml` | `SYNAPSE_A2A_PATH` | `config/a2a.toml` | El registro A2A arranca vacío. |
 
@@ -82,6 +82,7 @@ Consulta [Claves de nivel](../configuration/routes.md#tier-keys).
 |---|---|---|---|---|
 | `dimensions` | integer | Sí | — | Tamaño del vector de salida. Mayor que 0. |
 | `legs` | array of leg tables | Sí | — | Al menos un tramo. |
+| `policy` | string | No | la política `default` | Nombre de la política de guardrails de `guardrails.toml`. |
 
 Consulta [Alias de embeddings](../configuration/routes.md#embedding-aliases).
 

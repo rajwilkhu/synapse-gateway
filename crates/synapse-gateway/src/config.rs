@@ -21,6 +21,12 @@ pub struct Config {
     pub env: HashMap<String, String>,
     /// How to treat a route whose provider this process cannot satisfy.
     pub provider_validation: ProviderValidation,
+    /// Whether the guardrails file and every named policy must exist.
+    pub guardrails_mode: GuardrailsMode,
+    /// Which models the Gemini passthrough forwards.
+    pub passthrough_models: PassthroughModels,
+    /// Where the A2A admin routes are served.
+    pub admin_addr: AdminAddr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +106,74 @@ impl ProviderValidation {
     }
 }
 
+fn lowered(env: &HashMap<String, String>, key: &str) -> Option<String> {
+    env.get(key).map(|s| s.trim().to_ascii_lowercase())
+}
+
+/// Whether the guardrails file, and every policy a route names, must exist.
+/// `Required` (the default) refuses to start when either is missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GuardrailsMode {
+    #[default]
+    Required,
+    Optional,
+}
+
+impl GuardrailsMode {
+    /// `SYNAPSE_GUARDRAILS=optional` opts out; anything else is required.
+    pub fn from_env(env: &HashMap<String, String>) -> Self {
+        match lowered(env, "SYNAPSE_GUARDRAILS").as_deref() {
+            Some("optional") => Self::Optional,
+            _ => Self::Required,
+        }
+    }
+}
+
+/// Which models the Gemini passthrough forwards. `Routed` (the default)
+/// forwards only a route alias or a model that is a Vertex leg of a route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PassthroughModels {
+    #[default]
+    Routed,
+    Any,
+}
+
+impl PassthroughModels {
+    /// `SYNAPSE_PASSTHROUGH_MODELS=any` opts out; anything else is routed.
+    pub fn from_env(env: &HashMap<String, String>) -> Self {
+        match lowered(env, "SYNAPSE_PASSTHROUGH_MODELS").as_deref() {
+            Some("any") => Self::Any,
+            _ => Self::Routed,
+        }
+    }
+}
+
+pub const DEFAULT_ADMIN_ADDR: &str = "127.0.0.1:8081";
+
+/// Where the A2A admin routes are served: their own listener, or merged onto
+/// the API app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminAddr {
+    Shared,
+    Listen(String),
+}
+
+impl AdminAddr {
+    /// `SYNAPSE_ADMIN_ADDR=shared` merges; any other non-blank value is a
+    /// listen address; unset means `127.0.0.1:8081`.
+    pub fn from_env(env: &HashMap<String, String>) -> Self {
+        match env
+            .get("SYNAPSE_ADMIN_ADDR")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            Some(s) if s.eq_ignore_ascii_case("shared") => Self::Shared,
+            Some(s) => Self::Listen(s.to_string()),
+            None => Self::Listen(DEFAULT_ADMIN_ADDR.to_string()),
+        }
+    }
+}
+
 /// Resolve the GCP project id for Vertex from an env map.
 /// `VERTEX_PROJECT_ID` is preferred; `VERTEX_PROJECT` is accepted for compatibility.
 pub fn vertex_project_from_env(env: &HashMap<String, String>) -> Option<String> {
@@ -149,6 +223,9 @@ impl Config {
             .unwrap_or(0.10),
             env: env.clone(),
             provider_validation: ProviderValidation::from_env(env),
+            guardrails_mode: GuardrailsMode::from_env(env),
+            passthrough_models: PassthroughModels::from_env(env),
+            admin_addr: AdminAddr::from_env(env),
         })
     }
 }
@@ -315,5 +392,80 @@ mod tests {
             .expect("config/guardrails.toml should exist");
         let cfg = crate::guard::GuardrailsConfig::from_toml_str(&content).unwrap();
         crate::guard::GuardEngine::from_config(&cfg).expect("sample policies must compile");
+    }
+
+    #[test]
+    fn guardrails_mode_defaults_to_required_and_opts_out_on_optional() {
+        for (pairs, want) in [
+            (vec![], GuardrailsMode::Required),
+            (
+                vec![("SYNAPSE_GUARDRAILS", "optional")],
+                GuardrailsMode::Optional,
+            ),
+            (
+                vec![("SYNAPSE_GUARDRAILS", "  OPTIONAL ")],
+                GuardrailsMode::Optional,
+            ),
+            (
+                vec![("SYNAPSE_GUARDRAILS", "required")],
+                GuardrailsMode::Required,
+            ),
+            (
+                vec![("SYNAPSE_GUARDRAILS", "off")],
+                GuardrailsMode::Required,
+            ),
+        ] {
+            let e = env(&pairs);
+            assert_eq!(GuardrailsMode::from_env(&e), want, "for {pairs:?}");
+            assert_eq!(Config::from_env_map(&e).unwrap().guardrails_mode, want);
+        }
+    }
+
+    #[test]
+    fn passthrough_models_defaults_to_routed_and_opts_out_on_any() {
+        for (pairs, want) in [
+            (vec![], PassthroughModels::Routed),
+            (
+                vec![("SYNAPSE_PASSTHROUGH_MODELS", "any")],
+                PassthroughModels::Any,
+            ),
+            (
+                vec![("SYNAPSE_PASSTHROUGH_MODELS", " Any ")],
+                PassthroughModels::Any,
+            ),
+            (
+                vec![("SYNAPSE_PASSTHROUGH_MODELS", "routed")],
+                PassthroughModels::Routed,
+            ),
+            (
+                vec![("SYNAPSE_PASSTHROUGH_MODELS", "all")],
+                PassthroughModels::Routed,
+            ),
+        ] {
+            let e = env(&pairs);
+            assert_eq!(PassthroughModels::from_env(&e), want, "for {pairs:?}");
+            assert_eq!(Config::from_env_map(&e).unwrap().passthrough_models, want);
+        }
+    }
+
+    #[test]
+    fn admin_addr_defaults_to_loopback_and_shared_merges() {
+        for (pairs, want) in [
+            (vec![], AdminAddr::Listen(DEFAULT_ADMIN_ADDR.into())),
+            (
+                vec![("SYNAPSE_ADMIN_ADDR", "  ")],
+                AdminAddr::Listen(DEFAULT_ADMIN_ADDR.into()),
+            ),
+            (vec![("SYNAPSE_ADMIN_ADDR", "shared")], AdminAddr::Shared),
+            (vec![("SYNAPSE_ADMIN_ADDR", " SHARED ")], AdminAddr::Shared),
+            (
+                vec![("SYNAPSE_ADMIN_ADDR", "0.0.0.0:9091")],
+                AdminAddr::Listen("0.0.0.0:9091".into()),
+            ),
+        ] {
+            let e = env(&pairs);
+            assert_eq!(AdminAddr::from_env(&e), want, "for {pairs:?}");
+            assert_eq!(Config::from_env_map(&e).unwrap().admin_addr, want);
+        }
     }
 }
