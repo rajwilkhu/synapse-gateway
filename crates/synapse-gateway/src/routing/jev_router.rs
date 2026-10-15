@@ -157,7 +157,7 @@ fn truncate(s: &str, cap: usize) -> String {
 
 /// `s` unchanged when within `cap` characters; otherwise its first and last
 /// `cap / 2` characters joined by an ellipsis line.
-fn head_tail(s: &str, cap: usize) -> String {
+pub(crate) fn head_tail(s: &str, cap: usize) -> String {
     let n = s.chars().count();
     match n <= cap {
         true => s.to_string(),
@@ -378,6 +378,9 @@ pub struct RoutePlan {
     pub outcome: Option<DecisionOutcome>,
     /// The client's own effort replaces the effort this plan would apply.
     pub client_effort: bool,
+    /// `masked` when the guardrails rewrote the request or the reply;
+    /// `blocked` when output scanners blocked the reply.
+    pub guard: Option<&'static str>,
 }
 
 impl RoutePlan {
@@ -398,6 +401,7 @@ impl RoutePlan {
             decided: None,
             outcome: None,
             client_effort: client_effort && legs.iter().any(|l| l.effort.is_some()),
+            guard: None,
         }
     }
 
@@ -440,6 +444,7 @@ impl RoutePlan {
                     .map(|e| e.as_str().to_string()),
             },
             degraded: self.outcome.and_then(DecisionOutcome::degraded_reason),
+            guard: self.guard,
             tier,
         }
     }
@@ -456,6 +461,9 @@ pub struct RoutingReport {
     /// Effort applied by the serving leg, or `client`.
     pub effort: Option<String>,
     pub degraded: Option<&'static str>,
+    /// `masked` when the guardrails rewrote the request or the reply;
+    /// `blocked` when output scanners blocked the reply.
+    pub guard: Option<&'static str>,
 }
 
 impl RoutingReport {
@@ -477,6 +485,7 @@ impl RoutingReport {
                 self.degraded
                     .map(|d| ("x-synapse-routing-degraded", d.to_string())),
             )
+            .chain(self.guard.map(|g| ("x-synapse-guard", g.to_string())))
             .collect()
     }
 }
@@ -1004,6 +1013,7 @@ mod tests {
             decided: Some(2),
             outcome: Some(outcome),
             client_effort,
+            guard: None,
         }
     }
 
@@ -1019,6 +1029,7 @@ mod tests {
                 tier_decided: None,
                 effort: Some("medium".into()),
                 degraded: None,
+                guard: None,
             }
         );
         assert_eq!(

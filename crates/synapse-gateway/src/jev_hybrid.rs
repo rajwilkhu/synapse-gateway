@@ -51,6 +51,7 @@ impl Gateway {
                     &completion,
                     jev_legs.max(1),
                     started,
+                    "ok",
                 );
                 (answers, Some(completion), false)
             }
@@ -94,6 +95,7 @@ impl Gateway {
                         &completion,
                         rest.len() as u32,
                         started,
+                        "ok",
                     );
                     input_tokens += completion.input_tokens;
                     output_tokens += completion.output_tokens;

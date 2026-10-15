@@ -124,7 +124,9 @@ coincidieron; consulta [Respuesta de
 bloqueo](../configuration/guardrails-policy.md#block-response). Las políticas son una primera
 línea de defensa basada en patrones, no un filtro completo:
 
-- escanean peticiones, no respuestas;
+- solo escanean respuestas en las chat completions bajo una política con
+  [`output_scanners`](../configuration/guardrails-policy.md#output-scanning); las respuestas
+  del passthrough, de embeddings y de Jev nunca se escanean;
 - una ruta sin `policy` usa la política llamada `default`, y no tiene protección si no defines
   una;
 - la respuesta de bloqueo indica al cliente qué escáneres coincidieron, lo que ayuda a un

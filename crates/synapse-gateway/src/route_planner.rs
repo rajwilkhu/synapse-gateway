@@ -33,7 +33,7 @@ impl Gateway {
     /// Jev's difficulty rating.
     pub(crate) async fn plan_route(
         &self,
-        req: &ChatRequest,
+        req: &mut ChatRequest,
         ctx: &RequestCtx,
         request_id: &str,
     ) -> Result<RoutePlan, GatewayError> {
@@ -44,13 +44,18 @@ impl Gateway {
         let jev_route = self.routes.jev_route(&req.model);
         let mode = jev_router::resolve_mode(jev_route.is_some(), req.routing_strategy.as_deref())
             .map_err(GatewayError::BadRequest)?;
-        self.guard_input(req)?;
-        match (mode, jev_route) {
+        let decision = self.guard_input(req, ctx, request_id).await?;
+        let plan = match (mode, jev_route) {
             (RoutingMode::Jev | RoutingMode::StaticOverride, Some(route)) => {
-                self.plan_tiered(req, ctx, request_id, route, mode).await
+                self.plan_tiered(&*req, ctx, request_id, route, mode)
+                    .await?
             }
-            _ => Ok(RoutePlan::static_legs(legs, client_sets_effort(req))),
-        }
+            _ => RoutePlan::static_legs(legs, client_sets_effort(&*req)),
+        };
+        Ok(RoutePlan {
+            guard: decision.masked.then_some("masked"),
+            ..plan
+        })
     }
 
     async fn plan_tiered(
@@ -93,6 +98,7 @@ impl Gateway {
             decided: Some(selection.tier),
             outcome: Some(selection.outcome),
             client_effort: matches!(policy, EffortPolicy::Client),
+            guard: None,
         }
         .tap(|plan| {
             tracing::info!(

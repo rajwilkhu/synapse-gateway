@@ -34,6 +34,8 @@ pub enum GatewayError {
         policy: String,
         scanners: Vec<String>,
     },
+    #[error("guard classifier for policy '{policy}' is unavailable")]
+    GuardUnavailable { policy: String },
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -57,6 +59,7 @@ impl GatewayError {
             GatewayError::AllCircuitsOpen(_) => StatusCode::SERVICE_UNAVAILABLE,
             GatewayError::UpstreamTimeout => StatusCode::GATEWAY_TIMEOUT,
             GatewayError::ContentBlocked { .. } => StatusCode::BAD_REQUEST,
+            GatewayError::GuardUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -71,6 +74,7 @@ impl GatewayError {
             GatewayError::UpstreamTimeout => "upstream_timeout",
             GatewayError::Upstream { .. } => "upstream_error",
             GatewayError::ContentBlocked { .. } => "content_blocked",
+            GatewayError::GuardUnavailable { .. } => "guard_unavailable",
         }
     }
 }

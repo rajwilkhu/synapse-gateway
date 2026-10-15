@@ -116,7 +116,9 @@ a matching request with a `400` that names the policy and the scanners that matc
 response](../configuration/guardrails-policy.md#block-response). Policies are a
 pattern-matching first line of defence, not a complete filter:
 
-- they scan requests, not responses;
+- they scan responses only for chat completions under a policy with
+  [`output_scanners`](../configuration/guardrails-policy.md#output-scanning); passthrough,
+  embeddings and Jev responses are never scanned;
 - a route without a `policy` uses the policy named `default`, and has no protection if you
   don't define one;
 - the block response tells the caller which scanners matched, which helps an attacker adjust a

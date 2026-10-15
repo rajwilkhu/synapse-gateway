@@ -10,6 +10,7 @@ pub enum FinishReason {
     Stop,
     ToolCalls,
     Length,
+    ContentFilter,
 }
 
 impl FinishReason {
@@ -18,6 +19,7 @@ impl FinishReason {
             FinishReason::Stop => "stop",
             FinishReason::ToolCalls => "tool_calls",
             FinishReason::Length => "length",
+            FinishReason::ContentFilter => "content_filter",
         }
     }
 }
@@ -51,6 +53,12 @@ pub enum StreamItem {
         input_tokens: u64,
         output_tokens: u64,
         finish_reason: FinishReason,
+    },
+    /// Output screening blocked the reply. Follows a `Done` with
+    /// `FinishReason::ContentFilter` and ends the stream.
+    Blocked {
+        policy: String,
+        scanners: Vec<String>,
     },
 }
 
@@ -112,6 +120,7 @@ impl Accumulator {
                 self.finish_reason = finish_reason;
                 self.got_done = true;
             }
+            StreamItem::Blocked { .. } => {}
         }
     }
 
@@ -180,6 +189,17 @@ pub fn stream_item_to_sse_json(item: &StreamItem, id: &str, model: &str) -> Valu
             base(json!({ "tool_calls": [call] }), Value::Null)
         }
         StreamItem::Done { finish_reason, .. } => base(json!({}), json!(finish_reason.as_str())),
+        StreamItem::Blocked { policy, scanners } => json!({
+            "error": {
+                "type": "content_policy_violation",
+                "code": "content_blocked",
+                "message": format!(
+                    "Response blocked by content policy '{policy}' (scanners: {})",
+                    scanners.join(", ")
+                ),
+                "scanners": scanners,
+            }
+        }),
     }
 }
 

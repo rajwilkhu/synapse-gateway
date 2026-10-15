@@ -66,6 +66,7 @@ Las respuestas de los chat completions llevan el informe de enrutamiento.
 | `x-synapse-tier-decided` | El nivel que eligió Jev, cuando sirvió otro nivel. |
 | `x-synapse-reasoning-effort` | El esfuerzo del tramo que sirvió, o `client` cuando la petición fijó el suyo. |
 | `x-synapse-routing-degraded` | `timeout`, `error`, `low_confidence` o `jev_unavailable`. |
+| `x-synapse-guard` | `masked` cuando una política de guardrails reescribió texto de la petición. Aparece en chat completions (con o sin streaming), embeddings, el passthrough de Gemini y el passthrough de Jev. En una chat completion sin streaming, también `masked` cuando el escaneo de salida reescribió la respuesta, y `blocked` cuando la bloqueó. Consulta [Acciones y enmascaramiento](../configuration/guardrails-policy.md#actions-and-masking) y [Escaneo de salida](../configuration/guardrails-policy.md#output-scanning). |
 
 ## Errores {#errors}
 
@@ -89,6 +90,7 @@ Los errores del gateway son JSON con la forma de OpenAI:
 | `404` | `model_not_found` | El `model` no es un alias de ruta de chat (chat) ni un alias de embeddings (embeddings). |
 | `502` | `all_legs_failed` | Fallaron todos los tramos. Un array `failures` lista el `provider`, el `model` y el `message` de cada tramo. Consulta [Cuando fallan todos los tramos](../guides/fallback-chains.md#when-every-leg-fails). |
 | `502` | `upstream_error` | Un proveedor falló donde no era posible ningún fallback más, como el último tramo de Vertex nativo o un tramo de embeddings. |
+| `503` | `guard_unavailable` | Un clasificador de guardrails no dio respuesta con `on_error = "block"` en modo `block`. Consulta [Clasificador](../configuration/guardrails-policy.md#classifier). |
 
 El `message` es legible para personas y puede cambiar entre versiones; para distinguir errores,
 usa `code`. Un cuerpo que no es JSON válido, o que no encaja con el esquema del endpoint, se
@@ -173,8 +175,9 @@ Una petición sin streaming devuelve un `chat.completion`:
 - `id` es `chatcmpl-` seguido del id de la petición: el encabezado `x-synapse-message`, o un UUID
   generado.
 - `model` es el modelo del tramo que sirvió la petición, no el alias de la ruta.
-- `finish_reason` es `stop`, `length` o `tool_calls`. Una llamada a herramienta tiene
-  `content: null` y un array `tool_calls`.
+- `finish_reason` es `stop`, `length`, `tool_calls` o `content_filter`. Una llamada a
+  herramienta tiene `content: null` y un array `tool_calls`. `content_filter` significa que el
+  escaneo de salida bloqueó la respuesta, y `content` es `""`.
 - Una respuesta de [extracción híbrida](../guides/jev-lane.md#hybrid-extraction) añade un objeto
   `jev` con `answers`, `survivors` y `degraded`.
 
@@ -194,6 +197,11 @@ data: [DONE]
 Los fragmentos no llevan `usage` y `created` siempre es `0`. Un fallo después del primer
 fragmento llega como un evento cuyo cuerpo es un objeto de error, seguido de `[DONE]`; consulta
 [Fallback durante el streaming](../guides/streaming-and-tools.md#fallback-while-streaming).
+
+Cuando el escaneo de salida bloquea una respuesta en streaming, el stream termina con un
+fragmento cuyo `finish_reason` es `content_filter`, después un evento de error con `type`
+`content_policy_violation`, `code` `content_blocked` y los `scanners` que bloquearon, y después
+`[DONE]`. Consulta [Escaneo de salida](../configuration/guardrails-policy.md#streaming-responses).
 
 ## `POST /v1/embeddings` {#post-v1embeddings}
 
@@ -231,8 +239,9 @@ que se reenvía tal cual a Vertex AI con las credenciales del gateway.
   intento devuelve `502` con el código `upstream_error`. Si el gateway no tiene ningún proyecto
   de Vertex AI configurado, el endpoint devuelve `400`.
 
-Las peticiones de generación se escanean con la política de la ruta coincidente o, si no,
-`default` (consulta [Qué se escanea](../configuration/guardrails-policy.md#what-is-scanned)).
+Todas las acciones salvo `countTokens` y `computeTokens` se escanean con la política de la
+ruta o, si no, `default`, y un id de modelo con la política de cada ruta que lo incluye (consulta
+[Qué se escanea](../configuration/guardrails-policy.md#what-is-scanned)).
 Con `SYNAPSE_PASSTHROUGH_MODELS=routed` (el valor por defecto), un modelo que no es ni un alias
 de ruta ni un tramo `vertex` recibe `404`. Los errores del propio gateway en este endpoint usan
 la forma de error de Google.

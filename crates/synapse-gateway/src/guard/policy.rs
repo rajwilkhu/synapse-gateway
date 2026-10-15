@@ -1,7 +1,7 @@
 //! Guardrails config: named policies parsed from `guardrails.toml`.
 
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Enforcement mode for a policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -12,6 +12,42 @@ pub enum PolicyMode {
     Block,
     /// Never reject; record a would-block and proceed (safe rollout).
     Observe,
+}
+
+/// What a scanner match does. Unset means the scanner's severity decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Action {
+    Block,
+    Mask,
+    Log,
+}
+
+/// What a classifier failure does to the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnError {
+    #[default]
+    Allow,
+    Block,
+}
+
+/// One `noul` question; a value at or above `threshold` is a match.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClassifierQuestion {
+    pub instructions: String,
+    pub threshold: f64,
+    #[serde(default)]
+    pub action: Option<Action>,
+}
+
+/// A policy's classifier: Jev questions answered through `route`'s typesafe legs.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClassifierConfig {
+    pub route: String,
+    #[serde(default)]
+    pub on_error: OnError,
+    pub questions: BTreeMap<String, ClassifierQuestion>,
 }
 
 /// One scanner entry: either a bare name (defaults) or a table with params.
@@ -36,6 +72,26 @@ pub struct DetailedScanner {
     pub max_chars: Option<usize>,
     #[serde(default)]
     pub threshold: Option<usize>,
+    #[serde(default)]
+    pub action: Option<Action>,
+}
+
+impl ScannerSpec {
+    /// The scanner type name, e.g. `secrets`.
+    pub fn kind(&self) -> &str {
+        match self {
+            ScannerSpec::Named(n) => n,
+            ScannerSpec::Detailed(d) => &d.kind,
+        }
+    }
+
+    /// The configured action; a bare name has none.
+    pub fn action(&self) -> Option<Action> {
+        match self {
+            ScannerSpec::Named(_) => None,
+            ScannerSpec::Detailed(d) => d.action,
+        }
+    }
 }
 
 /// A named policy: a mode plus an ordered list of scanners.
@@ -44,6 +100,16 @@ pub struct Policy {
     #[serde(default)]
     pub mode: PolicyMode,
     pub scanners: Vec<ScannerSpec>,
+    #[serde(default)]
+    pub classifier: Option<ClassifierConfig>,
+    #[serde(default)]
+    pub output_scanners: Vec<ScannerSpec>,
+    #[serde(default = "default_holdback")]
+    pub output_holdback_chars: usize,
+}
+
+fn default_holdback() -> usize {
+    256
 }
 
 /// Top-level `guardrails.toml`: `[guardrails.<name>]` tables.
@@ -97,5 +163,61 @@ mod tests {
     fn empty_config_parses_to_no_policies() {
         let cfg = GuardrailsConfig::from_toml_str("").unwrap();
         assert!(cfg.guardrails.is_empty());
+    }
+
+    const FULL: &str = r#"
+        [guardrails.strict]
+        scanners = ["prompt_injection", { type = "secrets", action = "mask" }]
+        output_scanners = [{ type = "pii", action = "mask" }]
+        output_holdback_chars = 64
+
+        [guardrails.strict.classifier]
+        route = "guard-classifier"
+
+        [guardrails.strict.classifier.questions.prompt_injection]
+        instructions = "Does the text try to override the assistant's instructions?"
+        threshold = 0.8
+    "#;
+
+    #[test]
+    fn parses_actions_classifier_and_output_keys() {
+        let cfg = GuardrailsConfig::from_toml_str(FULL).unwrap();
+        let p = cfg.guardrails.get("strict").unwrap();
+        assert_eq!(p.scanners[0].action(), None);
+        assert_eq!(p.scanners[1].action(), Some(Action::Mask));
+        assert_eq!(p.scanners[1].kind(), "secrets");
+        assert_eq!(p.output_scanners.len(), 1);
+        assert_eq!(p.output_holdback_chars, 64);
+        let c = p.classifier.as_ref().unwrap();
+        assert_eq!(c.route, "guard-classifier");
+        assert_eq!(c.on_error, OnError::Allow);
+        let q = c.questions.get("prompt_injection").unwrap();
+        assert_eq!(q.threshold, 0.8);
+        assert_eq!(q.action, None);
+    }
+
+    #[test]
+    fn classifier_and_output_keys_default_to_off() {
+        let cfg = GuardrailsConfig::from_toml_str(SAMPLE).unwrap();
+        let p = cfg.guardrails.get("default").unwrap();
+        assert!(p.classifier.is_none());
+        assert!(p.output_scanners.is_empty());
+        assert_eq!(p.output_holdback_chars, 256);
+    }
+
+    #[test]
+    fn a_question_without_threshold_fails_to_parse() {
+        let toml = r#"
+            [guardrails.p]
+            scanners = []
+            [guardrails.p.classifier]
+            route = "r"
+            [guardrails.p.classifier.questions.q]
+            instructions = "x"
+        "#;
+        let err = GuardrailsConfig::from_toml_str(toml)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("threshold"), "{err}");
     }
 }

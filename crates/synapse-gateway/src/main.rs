@@ -131,11 +131,6 @@ async fn main() -> Result<()> {
         &routes,
         &embed_routes,
     )?;
-    let guard = guardrails
-        .as_ref()
-        .map(synapse::guard::GuardEngine::from_config)
-        .transpose()?
-        .unwrap_or_else(synapse::guard::GuardEngine::empty);
     tracing::info!(
         guardrails = ?config.guardrails_mode,
         passthrough_models = ?config.passthrough_models,
@@ -214,7 +209,7 @@ async fn main() -> Result<()> {
     let store = synapse::ledger::connect::build_store(&config, metrics.clone()).await;
     let ledger = LedgerHandle::spawn_with_metrics(store, 10_000, metrics.clone());
 
-    let builder = synapse::gateway::Gateway::builder()
+    let mut builder = synapse::gateway::Gateway::builder()
         .routes(routes)
         .catalog(catalog)
         .pricing(pricing)
@@ -227,11 +222,13 @@ async fn main() -> Result<()> {
             idle: config.stream_idle_timeout,
         })
         .default_tenant(config.default_tenant.clone())
-        .guard(guard)
         .passthrough_models(config.passthrough_models)
         .embed_routes(embed_routes)
         .embed_default_input_per_mtok(config.embed_default_input_per_mtok)
         .metrics(metrics);
+    if let Some(cfg) = guardrails {
+        builder = builder.guardrails(cfg);
+    }
     let gateway = embedders
         .into_iter()
         .fold(builder, |b, (id, e)| b.embedder(id, e))
