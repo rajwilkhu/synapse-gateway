@@ -11,7 +11,9 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
+use synapse::config::PassthroughModels;
 use synapse::gateway::Gateway;
+use synapse::guard::{GuardEngine, GuardrailsConfig};
 use synapse::ledger::{InMemoryLedger, LedgerHandle, LedgerStore, UsageEntry};
 use synapse::pricing::PricingTable;
 use synapse::providers::vertex_auth::VertexAuth;
@@ -531,4 +533,452 @@ async fn gemini_passthrough_counts_carry_the_vertex_provider_label() {
         text.lines().any(|l| l == line),
         "missing `{line}` in:\n{text}"
     );
+}
+
+const GUARD: &str = r#"
+    [guardrails.strict]
+    scanners = [{ type = "ban_substrings", substrings = ["forbidden"] }]
+    [guardrails.watch]
+    mode = "observe"
+    scanners = [{ type = "ban_substrings", substrings = ["forbidden"] }]
+"#;
+
+fn guarded_gateway(
+    mock_uri: &str,
+    routes_toml: &str,
+    mode: PassthroughModels,
+    metrics: Arc<GatewayMetrics>,
+) -> Gateway {
+    let routes = RouteTable::from_toml_str(routes_toml).unwrap();
+    let catalog = Catalog::build(
+        &HashMap::from([
+            ("VERTEX_PROJECT_ID".to_string(), PROJECT.to_string()),
+            ("DASHSCOPE_API_KEY".to_string(), "sk".to_string()),
+        ]),
+        &routes.referenced_providers(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    Gateway::builder()
+        .routes(routes)
+        .catalog(catalog)
+        .pricing(PricingTable::default())
+        .ledger(LedgerHandle::spawn(
+            Arc::new(InMemoryLedger::default()) as Arc<dyn LedgerStore>,
+            64,
+        ))
+        .vertex_native(Some(VertexNativeProvider::new(
+            vertex_auth(),
+            PROJECT.into(),
+            "global".into(),
+            Duration::from_secs(5),
+            Some(mock_uri.to_string()),
+        )))
+        .guard(GuardEngine::from_config(&GuardrailsConfig::from_toml_str(GUARD).unwrap()).unwrap())
+        .passthrough_models(mode)
+        .metrics(metrics)
+        .build()
+        .unwrap()
+}
+
+fn gemini_body(uri: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn user_says(text: &str) -> serde_json::Value {
+    serde_json::json!({"contents": [{"role": "user", "parts": [{"text": text}]}]})
+}
+
+async fn json_of(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+const OK_BODY: &str = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}"#;
+
+const TWO_ROUTES: &str = r#"
+    [routes."aaa"]
+    legs = [{ provider = "vertex", model = "gemini-2.5-flash" }]
+    [routes."chat"]
+    policy = "strict"
+    legs = [{ provider = "vertex", model = "gemini-2.5-flash" }]
+"#;
+
+#[tokio::test]
+async fn alias_path_uses_the_alias_policy_and_sends_the_leg_model() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(GENERATE_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(OK_BODY, "application/json"))
+        .expect(2)
+        .mount(&mock)
+        .await;
+    let app = router(Arc::new(guarded_gateway(
+        &mock.uri(),
+        TWO_ROUTES,
+        PassthroughModels::Routed,
+        GatewayMetrics::noop(),
+    )));
+
+    let (s, body) = json_of(
+        app.clone()
+            .oneshot(gemini_body(
+                "/v1beta/models/chat:generateContent",
+                user_says("this is forbidden"),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["status"], "INVALID_ARGUMENT");
+    assert_eq!(body["error"]["details"][0]["reason"], "CONTENT_BLOCKED");
+    assert_eq!(body["error"]["details"][0]["metadata"]["policy"], "strict");
+    assert!(
+        !body.to_string().contains("this is forbidden"),
+        "block body must not echo input: {body}"
+    );
+
+    let (s, _) = json_of(
+        app.clone()
+            .oneshot(gemini_body(
+                "/v1beta/models/chat:generateContent",
+                user_says("hello"),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "alias forwards to the leg model path");
+
+    // By model id, the lex-first route `aaa` has no policy and there is no `default`.
+    let (s, _) = json_of(
+        app.oneshot(gemini_body(
+            &format!("/v1beta/models/{MODEL}:generateContent"),
+            user_says("this is forbidden"),
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn passthrough_scans_user_system_and_tool_text_but_not_model_turns() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(GENERATE_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(OK_BODY, "application/json"))
+        .mount(&mock)
+        .await;
+    let app = router(Arc::new(guarded_gateway(
+        &mock.uri(),
+        TWO_ROUTES,
+        PassthroughModels::Routed,
+        GatewayMetrics::noop(),
+    )));
+    let uri = "/v1beta/models/chat:generateContent";
+    for (body, want) in [
+        (
+            serde_json::json!({"contents": [{"role": "model", "parts": [{"text": "forbidden"}, {"functionCall": {"name": "f", "args": {"q": "forbidden"}}}]}, {"role": "user", "parts": [{"text": "hi"}]}]}),
+            StatusCode::OK,
+        ),
+        (
+            serde_json::json!({"systemInstruction": {"parts": [{"text": "forbidden"}]}, "contents": [{"role": "user", "parts": [{"text": "hi"}]}]}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({"contents": [{"role": "user", "parts": [{"functionResponse": {"name": "f", "response": {"out": "forbidden"}}}]}]}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({"contents": [{"role": "function", "parts": [{"function_response": {"name": "f", "response": {"out": "forbidden"}}}]}]}),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(gemini_body(uri, body.clone()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), want, "for {body}");
+    }
+}
+
+#[tokio::test]
+async fn routed_mode_rejects_an_unknown_model_without_calling_upstream() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(OK_BODY, "application/json"))
+        .expect(0)
+        .mount(&mock)
+        .await;
+    let app = router(Arc::new(guarded_gateway(
+        &mock.uri(),
+        TWO_ROUTES,
+        PassthroughModels::Routed,
+        GatewayMetrics::noop(),
+    )));
+    for action in ["generateContent", "countTokens"] {
+        let (s, body) = json_of(
+            app.clone()
+                .oneshot(gemini_body(
+                    &format!("/v1beta/models/gemini-unknown:{action}"),
+                    user_says("hi"),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{action}");
+        assert_eq!(body["error"]["status"], "NOT_FOUND");
+        assert_eq!(body["error"]["details"][0]["reason"], "UNKNOWN_MODEL");
+    }
+}
+
+#[tokio::test]
+async fn any_mode_forwards_an_unknown_model() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/projects/p/locations/global/publishers/google/models/gemini-unknown:generateContent"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(OK_BODY, "application/json"))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    let app = router(Arc::new(guarded_gateway(
+        &mock.uri(),
+        TWO_ROUTES,
+        PassthroughModels::Any,
+        GatewayMetrics::noop(),
+    )));
+    let resp = app
+        .oneshot(gemini_body(
+            "/v1beta/models/gemini-unknown:generateContent",
+            user_says("hi"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn count_tokens_is_never_scanned() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/v1/projects/p/locations/global/publishers/google/models/gemini-2.5-flash:countTokens",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"totalTokens": 3})),
+        )
+        .expect(1)
+        .mount(&mock)
+        .await;
+    let app = router(Arc::new(guarded_gateway(
+        &mock.uri(),
+        TWO_ROUTES,
+        PassthroughModels::Routed,
+        GatewayMetrics::noop(),
+    )));
+    let resp = app
+        .oneshot(gemini_body(
+            "/v1beta/models/chat:countTokens",
+            user_says("forbidden"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn blocked_stream_request_makes_no_upstream_call() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&mock)
+        .await;
+    let app = router(Arc::new(guarded_gateway(
+        &mock.uri(),
+        TWO_ROUTES,
+        PassthroughModels::Routed,
+        GatewayMetrics::noop(),
+    )));
+    let resp = app
+        .oneshot(gemini_body(
+            "/v1beta/models/chat:streamGenerateContent?alt=sse",
+            user_says("forbidden"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn malformed_json_gets_the_google_error_shape() {
+    let mock = MockServer::start().await;
+    let app = router(Arc::new(guarded_gateway(
+        &mock.uri(),
+        TWO_ROUTES,
+        PassthroughModels::Routed,
+        GatewayMetrics::noop(),
+    )));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1beta/models/chat:generateContent")
+        .header("content-type", "application/json")
+        .body(Body::from("{not json"))
+        .unwrap();
+    let (status, body) = json_of(app.oneshot(req).await.unwrap()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["status"], "INVALID_ARGUMENT");
+}
+
+#[tokio::test]
+async fn object_form_and_uppercase_role_bodies_are_scanned() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(OK_BODY))
+        .expect(0)
+        .mount(&mock)
+        .await;
+    let app = router(Arc::new(guarded_gateway(
+        &mock.uri(),
+        TWO_ROUTES,
+        PassthroughModels::Routed,
+        GatewayMetrics::noop(),
+    )));
+    for body in [
+        serde_json::json!({"contents": {"role": "user", "parts": {"text": "forbidden"}}}),
+        serde_json::json!({"contents": [{"role": "USER", "parts": [{"text": "forbidden"}]}]}),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(gemini_body("/v1beta/models/chat:generateContent", body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn fallback_legs_do_not_rescan() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/v1/projects/p/locations/global/publishers/google/models/gemini-a:generateContent",
+        ))
+        .respond_with(
+            ResponseTemplate::new(429).set_body_json(serde_json::json!({"error": {"code": 429}})),
+        )
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/v1/projects/p/locations/global/publishers/google/models/gemini-b:generateContent",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(OK_BODY, "application/json"))
+        .mount(&mock)
+        .await;
+    let (metrics, exporter) = test_metrics();
+    let routes = r#"[routes."chat"]
+        policy = "watch"
+        legs = [{ provider = "vertex", model = "gemini-a" }, { provider = "vertex", model = "gemini-b" }]"#;
+    let app = router(Arc::new(guarded_gateway(
+        &mock.uri(),
+        routes,
+        PassthroughModels::Routed,
+        metrics,
+    )));
+    let resp = app
+        .oneshot(gemini_body(
+            "/v1beta/models/chat:generateContent",
+            user_says("forbidden"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "observe policy lets it through"
+    );
+    let line =
+        r#"synapse_guard_scans_total{lane="passthrough",outcome="observe",policy="watch"} 1"#;
+    let text = scrape(&exporter);
+    assert!(
+        text.lines().any(|l| l == line),
+        "missing `{line}` in:\n{text}"
+    );
+}
+
+#[tokio::test]
+async fn alias_with_no_leading_vertex_legs_is_bad_request() {
+    let mock = MockServer::start().await;
+    let routes = r#"[routes."other"]
+        legs = [{ provider = "qwen", model = "qwen-max" }]"#;
+    let app = router(Arc::new(guarded_gateway(
+        &mock.uri(),
+        routes,
+        PassthroughModels::Routed,
+        GatewayMetrics::noop(),
+    )));
+    let (s, body) = json_of(
+        app.oneshot(gemini_body(
+            "/v1beta/models/other:generateContent",
+            user_says("hi"),
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["status"], "INVALID_ARGUMENT");
+}
+
+async fn assert_rejected_without_upstream(uri: &str, mode: PassthroughModels) {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(OK_BODY, "application/json"))
+        .expect(0)
+        .mount(&mock)
+        .await;
+    let app = router(Arc::new(guarded_gateway(
+        &mock.uri(),
+        TWO_ROUTES,
+        mode,
+        GatewayMetrics::noop(),
+    )));
+    let (s, body) = json_of(
+        app.oneshot(gemini_body(uri, user_says("forbidden")))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{uri}: {body}");
+    assert_eq!(body["error"]["status"], "INVALID_ARGUMENT");
+}
+
+#[tokio::test]
+async fn encoded_query_in_the_model_is_rejected_in_any_mode() {
+    assert_rejected_without_upstream(
+        "/v1beta/models/gemini-2.5-flash:generateContent%3Fx=:countTokens",
+        PassthroughModels::Any,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn encoded_path_traversal_in_the_action_is_rejected_in_routed_mode() {
+    assert_rejected_without_upstream(
+        "/v1beta/models/gemini-2.5-flash:countTokens%2F..%2Fgemini-2.5-flash%253AgenerateContent",
+        PassthroughModels::Routed,
+    )
+    .await;
 }

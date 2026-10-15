@@ -1,7 +1,7 @@
 ---
 sidebar_position: 1
 title: synapse-a2a
-description: synapse-a2a es un registro en memoria de agentes agent-to-agent (A2A) que el gateway Synapse sirve en su puerto de API, con registro por administración y descubrimiento público.
+description: synapse-a2a es un registro en memoria de agentes agent-to-agent (A2A) que el gateway Synapse sirve en su puerto de API, con registro por administración en `SYNAPSE_ADMIN_ADDR` y descubrimiento público.
 ---
 
 `synapse-a2a` es un registro en memoria de agentes agent-to-agent
@@ -24,13 +24,14 @@ del gateway o con un conjunto de agentes conocido al arrancar. Consulta
 ## Cómo encaja {#how-it-fits}
 
 El binario del gateway sirve el registro. Al arrancar crea un registro, lo siembra desde
-`a2a.toml` si el archivo existe, y fusiona las rutas de administración y públicas en su listener
-de API, `SYNAPSE_ADDR` (por defecto `0.0.0.0:8080`). No hay un proceso ni un puerto aparte:
+`a2a.toml` si el archivo existe, y sirve las rutas públicas en su listener de API,
+`SYNAPSE_ADDR` (por defecto `0.0.0.0:8080`), y las rutas de administración en
+`SYNAPSE_ADMIN_ADDR` (por defecto `127.0.0.1:8081`). No hay un proceso aparte:
 
 ```text
-agent host ──POST   /internal/a2a/agents────────────────▶ synapse-gateway :8080
+agent host ──POST   /internal/a2a/agents────────────────▶ synapse-gateway :8081 (admin)
 agent host ──DELETE /internal/a2a/agents/{id}───────────▶ same
-client     ──GET    /.well-known/a2a-agent-catalog.json─▶ same
+client     ──GET    /.well-known/a2a-agent-catalog.json─▶ synapse-gateway :8080
 client     ──GET    /a2a/agents/{id}/resolve────────────▶ same   ──▶ then calls the agent directly
 ```
 
@@ -48,9 +49,9 @@ los encabezados de atribución `x-synapse-*` y no quedan anotadas en el registro
 las métricas.
 
 :::warning
-Los endpoints `/internal/` no tienen autenticación y comparten puerto con la API de LLM.
-Bloquéalos en tu ingress para todos salvo los servicios que registran agentes; consulta
-[Los endpoints de administración de A2A están abiertos](../../operating/security.md#the-a2a-admin-endpoints-are-open).
+Los endpoints `/internal/` no tienen autenticación. Mantén `SYNAPSE_ADMIN_ADDR` accesible solo
+para los servicios que registran agentes; consulta [Los endpoints de administración de A2A
+están abiertos](../../operating/security.md#the-a2a-admin-endpoints-are-open).
 :::
 
 ## Ejecutar más de una instancia {#running-more-than-one-instance}

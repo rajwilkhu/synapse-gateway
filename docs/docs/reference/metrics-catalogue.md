@@ -79,11 +79,13 @@ successful requests are counted, and the duration covers the serving leg alone. 
 
 | Metric | Type | Unit | Labels |
 |---|---|---|---|
-| `synapse_guard_scans_total` | Counter | scans | `policy`, `outcome` |
-| `synapse_guard_matches_total` | Counter | matches | `policy`, `scanner`, `severity` |
-| `synapse_guard_scan_duration_seconds` | Histogram | seconds | `policy` |
+| `synapse_guard_scans_total` | Counter | scans | `lane`, `policy`, `outcome` |
+| `synapse_guard_matches_total` | Counter | matches | `lane`, `policy`, `scanner`, `severity` |
+| `synapse_guard_scan_duration_seconds` | Histogram | seconds | `lane`, `policy` |
 
-`outcome` is `pass`, `flag`, `block` or `observe`; `severity` is `block`, `warn` or `info`. See
+`lane` is `chat`, `passthrough`, `embeddings` or `jev`, a different set of values from the
+`lane` label on `synapse_requests_total` (`standard`, `native` or `jev`). `outcome` is `pass`,
+`flag`, `block` or `observe`; `severity` is `block`, `warn` or `info`. See
 [Guardrails policy](../configuration/guardrails-policy.md#metrics).
 
 ### Cost ledger

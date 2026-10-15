@@ -195,23 +195,36 @@ impl GatewayMetrics {
             .record(f64::from(state), &[KeyValue::new("name", name)]);
     }
 
-    pub fn guard_scan(&self, policy: &str, outcome: &'static str, secs: f64) {
+    pub fn guard_scan(&self, policy: &str, lane: &'static str, outcome: &'static str, secs: f64) {
         self.guard_scans.add(
             1,
             &[
                 KeyValue::new("policy", policy.to_string()),
+                KeyValue::new("lane", lane),
                 KeyValue::new("outcome", outcome),
             ],
         );
-        self.guard_scan_duration
-            .record(secs, &[KeyValue::new("policy", policy.to_string())]);
+        self.guard_scan_duration.record(
+            secs,
+            &[
+                KeyValue::new("policy", policy.to_string()),
+                KeyValue::new("lane", lane),
+            ],
+        );
     }
 
-    pub fn guard_match(&self, policy: &str, scanner: &str, severity: &'static str) {
+    pub fn guard_match(
+        &self,
+        policy: &str,
+        lane: &'static str,
+        scanner: &str,
+        severity: &'static str,
+    ) {
         self.guard_matches.add(
             1,
             &[
                 KeyValue::new("policy", policy.to_string()),
+                KeyValue::new("lane", lane),
                 KeyValue::new("scanner", scanner.to_string()),
                 KeyValue::new("severity", severity),
             ],
@@ -387,8 +400,8 @@ mod tests {
         m.retry_attempt("qwen");
         m.resilience_call("qwen", "success", 0.3);
         m.breaker_transition("qwen", "open", 1);
-        m.guard_scan("strict", "block", 0.001);
-        m.guard_match("strict", "ban_substrings", "block");
+        m.guard_scan("strict", "chat", "block", 0.001);
+        m.guard_match("strict", "chat", "ban_substrings", "block");
         m.routing_decision("auto", "hard", "decided");
         m.routing_decision_duration("auto", 0.12);
     }
@@ -429,8 +442,8 @@ mod tests {
         m.retry_attempt("qwen");
         m.resilience_call("qwen", "success", 0.3);
         m.breaker_transition("qwen", "open", 1);
-        m.guard_scan("strict", "block", 0.001);
-        m.guard_match("strict", "ban_substrings", "block");
+        m.guard_scan("strict", "chat", "block", 0.001);
+        m.guard_match("strict", "chat", "ban_substrings", "block");
         m.routing_decision("auto", "hard", "decided");
         m.routing_decision_duration("auto", 0.12);
         let text = scrape(&exporter);
@@ -451,9 +464,9 @@ mod tests {
             r#"synapse_resilience_call_duration_seconds_count{label="qwen",outcome="success"} 1"#,
             r#"synapse_resilience_breaker_transitions_total{name="qwen",transition="open"} 1"#,
             r#"synapse_resilience_breaker_state{name="qwen"} 1"#,
-            r#"synapse_guard_scans_total{outcome="block",policy="strict"} 1"#,
-            r#"synapse_guard_matches_total{policy="strict",scanner="ban_substrings",severity="block"} 1"#,
-            r#"synapse_guard_scan_duration_seconds_count{policy="strict"} 1"#,
+            r#"synapse_guard_scans_total{lane="chat",outcome="block",policy="strict"} 1"#,
+            r#"synapse_guard_matches_total{lane="chat",policy="strict",scanner="ban_substrings",severity="block"} 1"#,
+            r#"synapse_guard_scan_duration_seconds_count{lane="chat",policy="strict"} 1"#,
             r#"synapse_routing_decisions_total{outcome="decided",route="auto",tier="hard"} 1"#,
             r#"synapse_routing_decision_duration_seconds_count{route="auto"} 1"#,
         ] {

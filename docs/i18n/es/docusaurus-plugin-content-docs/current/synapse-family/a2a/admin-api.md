@@ -5,8 +5,9 @@ description: Registra y elimina agentes A2A en tiempo de ejecución a través de
 ---
 
 Los hosts de agentes usan la API de administración para añadir sus agentes al registro cuando
-arrancan y para eliminarlos cuando se detienen. Los endpoints están en el puerto de API del
-gateway.
+arrancan y para eliminarlos cuando se detienen. Los endpoints están en el listener de
+administración, `SYNAPSE_ADMIN_ADDR` (por defecto `127.0.0.1:8081`); con `shared` están en el
+puerto de la API.
 
 :::warning
 Los endpoints de administración no tienen autenticación. Cualquiera que pueda alcanzarlos puede
@@ -20,7 +21,7 @@ servicios que registran agentes; consulta
 Registra un agente si su id todavía no está registrado.
 
 ```bash
-curl -s -X POST localhost:8080/internal/a2a/agents \
+curl -s -X POST localhost:8081/internal/a2a/agents \
   -H 'Content-Type: application/json' \
   -d @agent.json
 ```
@@ -70,8 +71,8 @@ devuelve `204`. Se conservan la entrada existente y su caducidad. Para sustituir
 elimínalo primero:
 
 ```bash
-curl -s -X DELETE localhost:8080/internal/a2a/agents/invoice-agent
-curl -s -X POST localhost:8080/internal/a2a/agents -H 'Content-Type: application/json' -d @agent.json
+curl -s -X DELETE localhost:8081/internal/a2a/agents/invoice-agent
+curl -s -X POST localhost:8081/internal/a2a/agents -H 'Content-Type: application/json' -d @agent.json
 ```
 
 Un agente caducado solo se elimina la próxima vez que se lista el catálogo o se consulta el

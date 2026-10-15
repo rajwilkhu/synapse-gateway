@@ -1,7 +1,7 @@
 ---
 sidebar_position: 1
 title: synapse-a2a
-description: synapse-a2a is an in-memory agent-to-agent (A2A) registry that the Synapse gateway serves on its API port, with admin registration and public discovery.
+description: synapse-a2a is an in-memory agent-to-agent (A2A) registry that the Synapse gateway serves on its API port, with admin registration on `SYNAPSE_ADMIN_ADDR` and public discovery.
 ---
 
 `synapse-a2a` is an in-memory registry of agent-to-agent
@@ -23,13 +23,14 @@ instance or a set of agents that is known at startup. See
 ## How it fits
 
 The gateway binary serves the registry. At startup it creates one registry, seeds it from
-`a2a.toml` if the file exists, and merges the admin and public routes into its API listener,
-`SYNAPSE_ADDR` (default `0.0.0.0:8080`). There is no separate process or port:
+`a2a.toml` if the file exists, and serves the public routes on its API listener, `SYNAPSE_ADDR`
+(default `0.0.0.0:8080`), and the admin routes on `SYNAPSE_ADMIN_ADDR` (default
+`127.0.0.1:8081`). There is no separate process:
 
 ```text
-agent host ──POST   /internal/a2a/agents────────────────▶ synapse-gateway :8080
+agent host ──POST   /internal/a2a/agents────────────────▶ synapse-gateway :8081 (admin)
 agent host ──DELETE /internal/a2a/agents/{id}───────────▶ same
-client     ──GET    /.well-known/a2a-agent-catalog.json─▶ same
+client     ──GET    /.well-known/a2a-agent-catalog.json─▶ synapse-gateway :8080
 client     ──GET    /a2a/agents/{id}/resolve────────────▶ same   ──▶ then calls the agent directly
 ```
 
@@ -47,8 +48,8 @@ read the `x-synapse-*` attribution headers and aren't recorded in the cost ledge
 metrics.
 
 :::warning
-The `/internal/` endpoints have no authentication, and they share a port with the LLM API.
-Block them at your ingress for everyone except the services that register agents; see
+The `/internal/` endpoints have no authentication. Keep `SYNAPSE_ADMIN_ADDR` reachable only
+by the services that register agents; see
 [The A2A admin endpoints are open](../../operating/security.md#the-a2a-admin-endpoints-are-open).
 :::
 

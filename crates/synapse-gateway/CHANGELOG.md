@@ -7,8 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Embedding aliases accept an optional `policy`.
+- `synapse_guard_scans_total`, `synapse_guard_matches_total` and `synapse_guard_scan_duration_seconds` carry a `lane` label: `chat`, `passthrough`, `embeddings` or `jev`.
+
 ### Changed
 
+- **Breaking:** Guardrails now scan the Gemini passthrough, `POST /v1/embeddings` and the Jev passthrough under the route's `policy`, else `default`. A deployment that defines `default` scans these lanes after upgrading; give a route an `observe` policy or a policy with `scanners = []` to opt out. The Jev passthrough has no route and always scans under `default`.
+- **Breaking:** `SYNAPSE_GUARDRAILS=required` is the default: the gateway refuses to start when the guardrails file is missing or a route or embedding alias names an undefined policy. Set `SYNAPSE_GUARDRAILS=optional` for the previous behaviour.
+- **Breaking:** `SYNAPSE_PASSTHROUGH_MODELS=routed` is the default: the Gemini passthrough forwards only a route alias or a model that is a `vertex` leg of a route, and returns `404` otherwise. Set `SYNAPSE_PASSTHROUGH_MODELS=any` for the previous behaviour.
+- **Breaking:** The A2A admin endpoints (`/internal/a2a/*`) listen on `SYNAPSE_ADMIN_ADDR`, default `127.0.0.1:8081`, instead of the API port. Set `SYNAPSE_ADMIN_ADDR=shared` for the previous behaviour.
+- **Breaking:** The Gemini passthrough resolves a path model that is a route alias to that route first, and uses the route's leading `vertex` legs and policy. A deployment with a route named after a concrete model id now gets that route's legs and policy for that model, and `400` if the route has no leading `vertex` legs.
+- **Breaking:** The Gemini passthrough returns the gateway's own errors in Google's error shape (`error.status`, `error.details`) instead of the OpenAI shape. Upstream responses pass through unchanged.
+- **Breaking:** The Gemini passthrough returns `400` for a path model with characters other than `A-Z a-z 0-9 . _ -`, or an action with characters other than `A-Z a-z`.
+- **Breaking:** Library users: `GatewayMetrics::guard_scan` and `GatewayMetrics::guard_match` take a `lane` argument.
+- **Breaking:** `synapse_guard_scans_total`, `synapse_guard_matches_total` and `synapse_guard_scan_duration_seconds` count the passthrough, embeddings and Jev lanes as well as chat, so totals and alert thresholds on them rise after upgrading. Filter on `{lane="chat"}` to reproduce the previous numbers.
 - Relicensed from AGPL-3.0-only to MPL-2.0 (Mozilla Public License 2.0).
 
 ## [2.0.0] - 2026-09-29

@@ -87,6 +87,7 @@ A named list of input scanners, such as prompt-injection, secrets or PII detecti
 under `[guardrails.<name>]` in `guardrails.toml`. A policy either blocks matching requests
 with `400` (mode `block`, the default) or only records them (mode `observe`). A route opts in
 with `policy = "<name>"`; routes without one use the `default` policy, and without a
-`default` policy or a `guardrails.toml` file, guardrails are off. See
+`default` policy those routes are not scanned. Without `guardrails.toml` the gateway refuses
+to start, unless `SYNAPSE_GUARDRAILS=optional`, which turns guardrails off. See
 [Guardrails policy](../configuration/guardrails-policy.md) and
 [Block response](../configuration/guardrails-policy.md#block-response).

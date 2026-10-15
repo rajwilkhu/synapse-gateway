@@ -91,10 +91,11 @@ y [Precios](../configuration/pricing.md).
 ## Política de guardrails {#guardrail-policy}
 
 Una lista con nombre de escáneres de entrada, como la detección de inyección de prompts,
-secretos o PII, definida bajo `[guardrails.<name>]` en `guardrails.toml`. Una política o
-bien bloquea las peticiones que coinciden con `400` (modo `block`, el valor por defecto) o
-bien solo las registra (modo `observe`). Una ruta se adhiere con `policy = "<name>"`; las
-rutas sin política usan la política `default` y, si no hay política `default` ni archivo
-`guardrails.toml`, los guardrails están desactivados. Consulta
-[Política de guardrails](../configuration/guardrails-policy.md) y
-[Respuesta de bloqueo](../configuration/guardrails-policy.md#block-response).
+secretos o PII, definida bajo `[guardrails.<name>]` en `guardrails.toml`. Una política o bien
+bloquea las peticiones que coinciden con `400` (modo `block`, el valor por defecto) o bien solo
+las registra (modo `observe`). Una ruta se adhiere con `policy = "<name>"`; las rutas sin
+política usan la política `default` y, si no hay política `default`, esas rutas no se escanean.
+Sin `guardrails.toml` el gateway se niega a arrancar, salvo con `SYNAPSE_GUARDRAILS=optional`,
+que desactiva los guardrails. Consulta [Política de
+guardrails](../configuration/guardrails-policy.md) y [Respuesta de
+bloqueo](../configuration/guardrails-policy.md#block-response).

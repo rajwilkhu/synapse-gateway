@@ -25,12 +25,15 @@ synapse-compose/
 ├── sa.json          # Google Cloud service-account key
 └── config/
     ├── routes.toml
-    └── pricing.toml
+    ├── pricing.toml
+    └── guardrails.toml
 ```
 
-Copy `config/routes.toml` and `config/pricing.toml` from the
+Copy `config/routes.toml`, `config/pricing.toml` and `config/guardrails.toml` from the
 [quickstart](../get-started/quickstart.md#create-the-configuration). They define the
-`gemini-flash` and `chat` routes, served by Vertex AI with a fallback to OpenAI.
+`gemini-flash` and `chat` routes, served by Vertex AI with a fallback to OpenAI, and the
+`default` guardrails policy that scans them. The gateway does not start without
+`guardrails.toml`.
 
 Save the stack as `compose.yaml`, and replace `my-gcp-project` with your Google Cloud
 project:
@@ -105,7 +108,9 @@ What the stack sets up:
   creates its `usage_events` table on first start. It waits for Postgres to report healthy,
   because a ledger sink that cannot connect at startup is skipped for the life of the
   process. `platform: linux/amd64` lets the image run on Apple silicon; `init: true` lets it
-  stop promptly. `NO_COLOR` keeps colour codes out of the logs.
+  stop promptly. `NO_COLOR` keeps colour codes out of the logs. It publishes the API
+  (`8080`) and metrics (`9090`) ports; the A2A admin endpoints stay on the container's
+  loopback, `127.0.0.1:8081` (see [Docker](docker.md#ports)).
 - **`postgres`** keeps the ledger in the `ledger` volume, so it survives
   `docker compose down`. Change the password before you use the stack for anything real.
 - **`prometheus`** scrapes the gateway's metrics port every 15 seconds under the job name
@@ -185,7 +190,7 @@ docker compose down -v     # delete the ledger too
 
 - Add a Pub/Sub or SNS sink next to Postgres, with `SYNAPSE_LEDGER_BACKENDS: postgres,pubsub`
   and the variables in [Ledger](../configuration/environment-variables.md#ledger).
-- Add guardrails by putting a `guardrails.toml` in `config/`; see
+- Tune the scanners in `config/guardrails.toml` and give routes their own policies; see
   [Guardrails policy](../configuration/guardrails-policy.md).
 - Work through the [production checklist](production-checklist.md) before exposing the
   gateway to real traffic.

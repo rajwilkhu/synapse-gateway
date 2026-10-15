@@ -13,7 +13,7 @@ instead; to run it next to Postgres and Prometheus, see [Docker Compose](docker-
 
 | Image | Binary | Ports | Runs as |
 |---|---|---|---|
-| `sustentabilitas/synapse-gateway` | `synapse-gateway` | `8080` API, `9090` Prometheus metrics | `synapse` (UID 1001) |
+| `sustentabilitas/synapse-gateway` | `synapse-gateway` | `8080` API, `9090` Prometheus metrics, `8081` A2A admin (container loopback) | `synapse` (UID 1001) |
 | `sustentabilitas/synapse-proxy` | `synapse-proxy` | `8787` proxy traffic, `9090` Prometheus metrics | `synapse` (UID 1001) |
 
 Each release is tagged with its version (for example `sustentabilitas/synapse-gateway:2.0.0`)
@@ -74,7 +74,8 @@ The image ships with the example configuration from
 [`crates/synapse-gateway/config/`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/config),
 which references providers you may not have credentials for. Always mount your own
 directory over `/app/config`. The mount replaces the whole directory, so only the files you
-provide are used: leave out `guardrails.toml` and guardrails are off.
+provide are used: leave out `guardrails.toml` and the gateway refuses to start, unless
+`SYNAPSE_GUARDRAILS=optional`, which turns guardrails off.
 
 To keep the files somewhere else in the container, set `SYNAPSE_ROUTES_PATH`,
 `SYNAPSE_PRICING_PATH` and the other path variables listed in
@@ -142,6 +143,12 @@ Start the database first, and check the logs for `ledger sink connected`. The
 set the listen addresses inside the container. The metrics port serves only Prometheus
 metrics, at `/metrics` and `/`; every other endpoint, including `/health`, is on the API
 port. Publish the metrics port only to your monitoring network.
+
+`SYNAPSE_ADMIN_ADDR` (default `127.0.0.1:8081`) serves the A2A admin endpoints. Inside a
+container, `127.0.0.1` is the container's own loopback, so nothing outside it can reach
+them. To let agent hosts register, set `SYNAPSE_ADMIN_ADDR=0.0.0.0:8081` and publish that
+port only to them, or set `SYNAPSE_ADMIN_ADDR=shared` to serve the endpoints on the API port.
+See [Security](../operating/security.md#the-a2a-admin-endpoints-are-open).
 
 ### Stopping
 

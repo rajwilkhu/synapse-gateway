@@ -88,8 +88,12 @@ que explica el ajuste en detalle.
   de la identidad autenticada, sobrescribiendo el valor del cliente. Consulta
   [Atribución por tenant](../guides/tenant-attribution.md).
 - [ ] **Bloquea los endpoints internos.** Los endpoints de administración del registro A2A,
-  `POST /internal/a2a/agents` y `DELETE /internal/a2a/agents/{id}`, se sirven en el puerto de
-  la API sin autenticación. No enrutes `/internal/` desde fuera de tu red.
+  `POST /internal/a2a/agents` y `DELETE /internal/a2a/agents/{id}`, se sirven en
+  `SYNAPSE_ADMIN_ADDR`. Déjalo sin definir (loopback) o accesible solo desde los hosts de
+  agentes; evita `shared`.
+- [ ] **Protege todos los carriles.** Define una política `default` o una política por ruta y
+  por alias de embeddings. Mantén `SYNAPSE_GUARDRAILS=required` y
+  `SYNAPSE_PASSTHROUGH_MODELS=routed`.
 - [ ] **Configura guardrails.** Añade un `guardrails.toml` con una política `default`,
   desplegada primero en modo `observe`, para que las inyecciones de prompt, los secretos y los
   datos personales se detecten antes de llegar a un proveedor. Consulta

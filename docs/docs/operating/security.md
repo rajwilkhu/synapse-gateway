@@ -61,6 +61,12 @@ no authentication:
 - `POST /internal/a2a/agents` registers an agent;
 - `DELETE /internal/a2a/agents/{id}` removes one.
 
+By default they listen on `127.0.0.1:8081`, apart from the API port. On a host, only local
+processes can reach them. In Docker or Kubernetes, `127.0.0.1` is the container's own
+loopback, so nothing outside the container can reach them. To let agent hosts register, set
+`SYNAPSE_ADMIN_ADDR=0.0.0.0:8081` and publish or expose that port only to them, or set
+`SYNAPSE_ADMIN_ADDR=shared` to serve the endpoints on the API port.
+
 Registration never overwrites an existing id, but a caller can delete an agent and register a
 new one under the same id with its own endpoint. Clients that resolve agents through the
 catalogue would then be sent to that endpoint. Block `/internal/` at your proxy for everything
@@ -102,14 +108,15 @@ to the caller, and a provider's error message can quote part of the request.
 
 ## Guardrails
 
-[Guardrail policies](../configuration/guardrails-policy.md) scan the messages of a chat request
-before any provider sees them. A policy in `block` mode stops a matching request with a `400`
-that names the policy and the scanners that matched; see
-[Block response](../configuration/guardrails-policy.md#block-response). Policies are a
+[Guardrail policies](../configuration/guardrails-policy.md) scan the text of every lane (chat,
+Gemini passthrough, embeddings and Jev passthrough) before any provider sees it, under the
+route's `policy`, else `default`; see [What is
+scanned](../configuration/guardrails-policy.md#what-is-scanned). A policy in `block` mode stops
+a matching request with a `400` that names the policy and the scanners that matched; see [Block
+response](../configuration/guardrails-policy.md#block-response). Policies are a
 pattern-matching first line of defence, not a complete filter:
 
-- they scan chat requests only. The Gemini and Jev passthroughs and `/v1/embeddings` are never
-  scanned;
+- they scan requests, not responses;
 - a route without a `policy` uses the policy named `default`, and has no protection if you
   don't define one;
 - the block response tells the caller which scanners matched, which helps an attacker adjust a

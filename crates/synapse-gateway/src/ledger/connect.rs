@@ -186,6 +186,9 @@ mod tests {
                 "postgres://invalid.invalid:5432/nope".into(),
             )]),
             provider_validation: crate::config::ProviderValidation::Strict,
+            guardrails_mode: crate::config::GuardrailsMode::Required,
+            passthrough_models: crate::config::PassthroughModels::Routed,
+            admin_addr: crate::config::AdminAddr::Listen(crate::config::DEFAULT_ADMIN_ADDR.into()),
         };
         let store = build_store(&config, GatewayMetrics::noop()).await;
         // NoopLedger: record always succeeds without persisting.
@@ -232,6 +235,9 @@ mod tests {
             embed_default_input_per_mtok: 0.10,
             env: HashMap::from([("SYNAPSE_LEDGER_SQLITE_DSN".into(), "sqlite::memory:".into())]),
             provider_validation: crate::config::ProviderValidation::Strict,
+            guardrails_mode: crate::config::GuardrailsMode::Required,
+            passthrough_models: crate::config::PassthroughModels::Routed,
+            admin_addr: crate::config::AdminAddr::Listen(crate::config::DEFAULT_ADMIN_ADDR.into()),
         };
         let store = build_store(&config, GatewayMetrics::noop()).await;
         let entry = crate::ledger::UsageEntry {

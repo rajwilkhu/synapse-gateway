@@ -186,7 +186,8 @@ to `POST /typesafe/v1/systemone`. Synapse forwards the body verbatim with its ow
 `TYPESAFE_API_KEY`, sets `model` to `jev-latest` if you omit it, and returns TypeSafe's
 status and body unchanged. There is no fallback and no streaming. Usage is recorded in the
 ledger with lane `passthrough`, attributed with the same headers as chat requests. Without
-`TYPESAFE_API_KEY`, the endpoint returns `400`.
+`TYPESAFE_API_KEY`, the endpoint returns `400`. Requests are scanned under the `default`
+policy, and no setting gives this endpoint a different policy.
 
 ## Jev lane and Jev router
 

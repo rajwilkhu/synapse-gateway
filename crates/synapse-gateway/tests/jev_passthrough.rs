@@ -217,3 +217,83 @@ async fn lane_unconfigured_returns_bad_request() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(store.entries.lock().is_empty());
 }
+
+use synapse::guard::{GuardEngine, GuardrailsConfig};
+
+fn guarded_jev_gateway(mock_uri: &str, guard_toml: &str) -> Gateway {
+    let routes = RouteTable::from_toml_str("[routes.\"dummy\"]\nlegs = []").unwrap();
+    let catalog = Catalog::build(
+        &HashMap::new(),
+        &routes.referenced_providers(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    Gateway::builder()
+        .routes(routes)
+        .catalog(catalog)
+        .pricing(PricingTable::default())
+        .ledger(LedgerHandle::spawn(
+            Arc::new(InMemoryLedger::default()) as Arc<dyn LedgerStore>,
+            64,
+        ))
+        .jev_native(Some(JevNativeProvider::new(
+            API_KEY.into(),
+            Some(mock_uri.to_string()),
+            Duration::from_secs(5),
+        )))
+        .guard(
+            GuardEngine::from_config(&GuardrailsConfig::from_toml_str(guard_toml).unwrap())
+                .unwrap(),
+        )
+        .build()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn jev_passthrough_blocks_on_default_before_any_upstream_call() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(SYSTEMONE_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"answers": {}})))
+        .expect(0)
+        .mount(&mock)
+        .await;
+    let gw = guarded_jev_gateway(
+        &mock.uri(),
+        r#"[guardrails.default]
+           scanners = [{ type = "ban_substrings", substrings = ["forbidden"] }]"#,
+    );
+    let body = serde_json::json!({"state": {"ticket": {"text": "this is forbidden"}, "n": 1}, "questions": {}});
+    let resp = router(Arc::new(gw))
+        .oneshot(jev_request(body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["error"]["type"], "content_policy_violation");
+}
+
+#[tokio::test]
+async fn jev_passthrough_does_not_scan_numbers_or_keys() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(SYSTEMONE_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({"answers": {}, "usage": {"input_tokens": 1, "output_tokens": 1}}),
+        ))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    let gw = guarded_jev_gateway(
+        &mock.uri(),
+        r#"[guardrails.default]
+           scanners = [{ type = "ban_substrings", substrings = ["forbidden", "1234"] }]"#,
+    );
+    let body = serde_json::json!({"state": {"forbidden": 1234}, "questions": {}});
+    let resp = router(Arc::new(gw))
+        .oneshot(jev_request(body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}

@@ -1,6 +1,7 @@
 # Named guardrail policies. Routes opt in via `policy = "<name>"` in routes.toml;
-# routes with no policy fall back to "default". If "default" is undefined (or this
-# file is absent), guardrails are off.
+# routes with no policy fall back to "default", and are not scanned if "default"
+# is undefined. Startup fails if this file is absent, unless
+# SYNAPSE_GUARDRAILS=optional, which runs without guardrails.
 #
 # mode = "block" (default) rejects on a block-severity hit; mode = "observe"
 # records a would-block metric and proceeds (safe rollout).

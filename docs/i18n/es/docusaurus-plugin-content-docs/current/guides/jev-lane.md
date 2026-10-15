@@ -187,12 +187,13 @@ Cada respuesta de Jev escribe una fila en el registro con el proveedor `typesafe
 
 ## Passthrough de Jev {#jev-passthrough}
 
-Para llamar a Jev sin el formato de chat completions, envía su cuerpo nativo
-`{state, questions}` a `POST /typesafe/v1/systemone`. Synapse reenvía el cuerpo literalmente
-con su propia `TYPESAFE_API_KEY`, establece `model` a `jev-latest` si lo omites, y devuelve el
-estado y el cuerpo de TypeSafe sin cambios. No hay fallback ni streaming. El uso se anota en
-el registro con el carril `passthrough`, atribuido con los mismos encabezados que las
-peticiones de chat. Sin `TYPESAFE_API_KEY`, el endpoint devuelve `400`.
+Para llamar a Jev sin el formato de chat completions, envía su cuerpo nativo `{state,
+questions}` a `POST /typesafe/v1/systemone`. Synapse reenvía el cuerpo literalmente con su
+propia `TYPESAFE_API_KEY`, establece `model` a `jev-latest` si lo omites, y devuelve el estado
+y el cuerpo de TypeSafe sin cambios. No hay fallback ni streaming. El uso se anota en el
+registro con el carril `passthrough`, atribuido con los mismos encabezados que las peticiones
+de chat. Sin `TYPESAFE_API_KEY`, el endpoint devuelve `400`. Las peticiones se escanean con la
+política `default`, y ningún ajuste asigna otra política a este endpoint.
 
 ## Carril Jev y router Jev {#jev-lane-and-jev-router}
 

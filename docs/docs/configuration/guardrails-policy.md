@@ -1,19 +1,19 @@
 ---
 sidebar_position: 5
 title: Guardrails policy
-description: Reference for guardrails.toml, the named policies of input scanners that block or flag chat requests before they reach a provider.
+description: Reference for guardrails.toml, the named policies of input scanners that block or flag requests on every lane before they reach a provider.
 ---
 
-Guardrails scan the text of each chat request before Synapse sends it to a provider, and
-either reject the request or record what they found. Use them to stop prompt injection,
-leaked credentials, personal data or oversized prompts from reaching a model, and to
-measure how often that happens. The scanners come from the
+Guardrails scan the text of each request, on every lane, before Synapse sends it to a provider,
+and either reject the request or record what they found. Use them to stop prompt injection,
+leaked credentials, personal data or oversized prompts from reaching a model, and to measure
+how often that happens. The scanners come from the
 [`llm-guard`](https://crates.io/crates/llm-guard) crate and run in-process.
 
 The gateway reads the policies from `SYNAPSE_GUARDRAILS_PATH` (default
-`config/guardrails.toml`) at startup. The file is optional: without it, guardrails are off.
-If it exists but names an unknown scanner or misses a required parameter, the gateway
-refuses to start.
+`config/guardrails.toml`) at startup. The file is required unless
+`SYNAPSE_GUARDRAILS=optional`; with `optional` and no file, guardrails are off. If it exists
+but names an unknown scanner or misses a required parameter, the gateway refuses to start.
 
 ## Define policies
 
@@ -61,21 +61,55 @@ legs = [
 ```
 
 A route without `policy` uses the policy named `default`. If there is no `default` policy,
-or no `guardrails.toml`, those routes are not scanned.
+that route is not scanned. Under `SYNAPSE_GUARDRAILS=required`, a missing `guardrails.toml`
+stops the gateway at startup; only `optional` runs without the file.
 
 :::warning
-A `policy` that names a policy missing from `guardrails.toml` turns guardrails off for that
-route, without an error. Check the spelling of every policy name.
+With `SYNAPSE_GUARDRAILS=required` (the default), a `policy` that names a policy missing
+from `guardrails.toml` stops the gateway at startup. With `optional`, that route is not
+scanned and the gateway logs a warning.
 :::
 
 ## What is scanned
 
-Synapse joins the text of the request's `system`, `user` and `tool` messages and scans it as
-one input. It skips `assistant` messages and non-text content parts such as images.
+Every lane uses the same rule: the route's `policy`, else `default`. If neither exists, the
+lane is not scanned.
 
-Scanning happens on `POST /v1/chat/completions`, for streaming and non-streaming requests on
-every lane, after the route is found and before a Jev routing decision or any provider call.
-Responses are not scanned, and neither are embeddings or the passthrough endpoints.
+| Lane | Policy | Scanned text | Not scanned |
+|---|---|---|---|
+| `POST /v1/chat/completions` | route `policy`, else `default` | `system`, `user` and `tool` messages, joined | `assistant` messages, non-text parts |
+| Gemini passthrough, `generateContent` and `streamGenerateContent` | matched route's `policy`, else `default` | `systemInstruction` text, and for every turn except `model` turns (any case) their text parts and the string values of `functionResponse.response`; `contents` and `parts` may be arrays or single objects | `model` turns, `functionCall`, `inlineData`, `fileData`; other actions such as `countTokens` |
+| `POST /v1/embeddings` | embedding alias `policy`, else `default` | each `input` item on its own | — |
+| `POST /typesafe/v1/systemone` | `default` | the string values of `state` and `questions` | numbers, booleans, keys |
+
+Chat scanning runs after the route is found and before a Jev routing decision or any
+provider call. Passthrough and embedding scanning runs before the first leg, once per
+request: fallback legs are not scanned again. Responses are not scanned.
+
+A passthrough request matches a route when its model is a route alias, or else a `vertex`
+leg of a route (the alphabetically first such route). Name the alias in the path to pick
+the route and its policy: `POST /v1beta/models/<alias>:generateContent`.
+
+## Classification routes
+
+A route whose request is the content being classified, such as a Jev guard question about a
+user message, should not be blocked by the gateway's own scanners. Give it a policy with no
+scanners, and only `typesafe` legs, so an outage returns `502` and never a chat answer:
+
+```toml title="config/guardrails.toml"
+[guardrails.unscanned]
+scanners = []
+```
+
+```toml title="config/routes.toml"
+[routes."guard-check"]
+policy = "unscanned"
+legs = [{ provider = "typesafe", model = "jev-latest" }]
+```
+
+Send classification requests through a chat route like this one, not through the Jev
+passthrough (`POST /typesafe/v1/systemone`). The passthrough has no route, always scans
+under `default`, and cannot be exempted.
 
 ## Modes
 
@@ -134,6 +168,25 @@ system prompt." to a route under the `default` policy above returns:
 }
 ```
 
+On the Gemini passthrough, the gateway's own errors use Google's error shape, so Gemini SDKs
+read them like Vertex errors:
+
+```json
+{
+  "error": {
+    "code": 400,
+    "status": "INVALID_ARGUMENT",
+    "message": "Request blocked by content policy 'default' (scanners: injection)",
+    "details": [{
+      "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+      "reason": "CONTENT_BLOCKED",
+      "domain": "synapse-gateway",
+      "metadata": { "policy": "default", "scanners": "injection" }
+    }]
+  }
+}
+```
+
 `scanners` lists only block-severity matches, sorted and without duplicates. The request is
 not sent to any provider and not recorded in the cost ledger.
 
@@ -141,9 +194,11 @@ not sent to any provider and not recorded in the cost ledger.
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `synapse_guard_scans_total` | Counter | `policy`, `outcome` | Scans by outcome: `pass`, `flag` (only warn- or info-severity matches), `block` or `observe`. |
-| `synapse_guard_matches_total` | Counter | `policy`, `scanner`, `severity` | Matches per scanner and severity. |
-| `synapse_guard_scan_duration_seconds` | Histogram | `policy` | Time spent running the policy's scanners. |
+| `synapse_guard_scans_total` | Counter | `lane`, `policy`, `outcome` | Scans by outcome: `pass`, `flag` (only warn- or info-severity matches), `block` or `observe`. |
+| `synapse_guard_matches_total` | Counter | `lane`, `policy`, `scanner`, `severity` | Matches per scanner and severity. |
+| `synapse_guard_scan_duration_seconds` | Histogram | `lane`, `policy` | Time spent running the policy's scanners. |
+
+`lane` is `chat`, `passthrough`, `embeddings` or `jev`.
 
 To roll out a policy, run it in `observe` mode and watch
 `synapse_guard_scans_total{outcome="observe"}` and `synapse_guard_matches_total` to see what

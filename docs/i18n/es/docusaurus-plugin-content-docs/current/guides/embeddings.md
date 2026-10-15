@@ -127,7 +127,8 @@ registro con el carril `embedding`, el proveedor y el modelo del tramo que la si
 `output_tokens` a 0. En los eventos publicados en Pub/Sub o SNS, la fila tiene
 `op = "embedding"`. Consulta [Registro de costes](cost-ledger.md).
 
-Los guardrails no analizan las peticiones de embeddings.
+Cada elemento de `input` se escanea con la `policy` del alias, si no con `default`, antes del
+primer tramo; consulta [Qué se escanea](../configuration/guardrails-policy.md#what-is-scanned).
 
 ## Métricas {#metrics}
 

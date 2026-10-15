@@ -4,13 +4,15 @@ title: HTTP API
 description: Every endpoint the gateway binary serves, with its request and response formats, the x-synapse-* headers and the error codes.
 ---
 
-The gateway binary serves two listeners:
+The gateway binary serves three listeners:
 
 - the **API**, on `SYNAPSE_ADDR` (default `0.0.0.0:8080`), with every endpoint on this page
-  except metrics;
-- the **metrics** endpoint, on `SYNAPSE_METRICS_ADDR` (default `0.0.0.0:9090`).
+  except metrics and the A2A admin endpoints;
+- the **metrics** endpoint, on `SYNAPSE_METRICS_ADDR` (default `0.0.0.0:9090`);
+- the **A2A admin** endpoints, `/internal/a2a/*`, on `SYNAPSE_ADMIN_ADDR` (default
+  `127.0.0.1:8081`), or on the API with `shared`.
 
-Both speak plain HTTP and neither authenticates callers; see
+All speak plain HTTP and none authenticates callers; see
 [Security](../operating/security.md).
 
 ## Endpoints
@@ -25,8 +27,8 @@ Both speak plain HTTP and neither authenticates callers; see
 | `POST` | `/v1/models/{model}:{action}` | Gemini-native passthrough to Vertex AI. |
 | `POST` | `/google/models/{model}:{action}` | Gemini-native passthrough to Vertex AI. |
 | `POST` | `/typesafe/v1/systemone` | Jev passthrough to TypeSafe System One. |
-| `POST` | `/internal/a2a/agents` | Register an A2A agent. |
-| `DELETE` | `/internal/a2a/agents/{id}` | Remove an A2A agent. |
+| `POST` | `/internal/a2a/agents` | Register an A2A agent (admin listener, `SYNAPSE_ADMIN_ADDR`). |
+| `DELETE` | `/internal/a2a/agents/{id}` | Remove an A2A agent (admin listener, `SYNAPSE_ADMIN_ADDR`). |
 | `GET` | `/.well-known/a2a-agent-catalog.json` | List the registered A2A agents. |
 | `GET` | `/a2a/agents/{id}/.well-known/agent-card.json` | One agent's A2A card. |
 | `GET` | `/a2a/agents/{id}/resolve` | One agent's endpoint and card. |
@@ -210,7 +212,7 @@ The response is an OpenAI `list` of `embedding` objects, in input order, with
 versions Google's Gemini SDKs use. The body is a Gemini request, forwarded verbatim to Vertex
 AI with the gateway's credentials.
 
-- `{model}` is a Vertex AI model name, not a route alias, and `{action}` is the part after the
+- `{model}` is a route alias or a Vertex AI model name, and `{action}` is the part after the
   last colon, such as `generateContent`, `streamGenerateContent` or `countTokens`.
 - `streamGenerateContent` with `?alt=sse` streams the response through.
 - `generateContent` and `streamGenerateContent` write a ledger row with lane `passthrough`. On
@@ -218,14 +220,18 @@ AI with the gateway's credentials.
   of the route that lists the model; see
   [Gemini SDK clients](../guides/native-vertex.md#gemini-sdk-clients).
 - Other actions are forwarded once, without a ledger row.
-- A model that no route lists is still forwarded, as a single attempt.
+- A model that no route lists is forwarded as a single attempt only with
+  `SYNAPSE_PASSTHROUGH_MODELS=any`; by default it gets `404`.
 - Streamed calls (`?alt=sse`) can run for up to an hour. Every other call is bounded by
   `SYNAPSE_REQUEST_TIMEOUT_SECS`.
 - Vertex AI's status and body are returned unchanged. A connection error on the last attempt
   returns `502` with code `upstream_error`. If the gateway has no Vertex AI project configured,
   the endpoint returns `400`.
 
-Guardrails don't scan passthrough requests.
+Generation requests are scanned under the matched route's policy, else `default` (see [What is
+scanned](../configuration/guardrails-policy.md#what-is-scanned)). With
+`SYNAPSE_PASSTHROUGH_MODELS=routed` (the default), a model that is neither a route alias nor a
+`vertex` leg gets `404`. The gateway's own errors on this endpoint use Google's error shape.
 
 ## Jev passthrough
 
@@ -233,13 +239,15 @@ Guardrails don't scan passthrough requests.
 with the gateway's `TYPESAFE_API_KEY`. The body must be a JSON object; if it has no `model`,
 the gateway sets `jev-latest`. TypeSafe's status and body are returned unchanged, and usage is
 recorded in the ledger with lane `passthrough`. Without `TYPESAFE_API_KEY`, the endpoint
-returns `400`. See [Jev passthrough](../guides/jev-lane.md#jev-passthrough).
+returns `400`. Requests are scanned under the `default` policy. See [Jev
+passthrough](../guides/jev-lane.md#jev-passthrough).
 
 ## A2A agent registry
 
 The gateway binary serves an in-memory registry of A2A agents, seeded at startup from
 `a2a.toml` (see [Configuration keys](./configuration-keys.md#a2atoml)). Each gateway instance
-has its own registry.
+has its own registry. The admin endpoints are served on `SYNAPSE_ADMIN_ADDR` (default
+`127.0.0.1:8081`), not on the API port, unless it is set to `shared`.
 
 ### `POST /internal/a2a/agents`
 

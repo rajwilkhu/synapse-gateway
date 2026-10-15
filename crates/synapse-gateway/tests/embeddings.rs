@@ -107,3 +107,119 @@ async fn http_embeddings_returns_list_and_records_ledger() {
     assert_eq!(entries[0].tenant, "acme");
     assert_eq!(entries[0].op, "embedding");
 }
+
+use synapse::guard::{GuardEngine, GuardrailsConfig};
+
+fn guarded_embed_gateway(embed_toml: &str, guard_toml: &str) -> synapse::gateway::Gateway {
+    let routes = RouteTable::from_toml_str(
+        r#"[routes."fast"]
+           legs = [{ provider = "qwen", model = "qwen-max" }]"#,
+    )
+    .unwrap();
+    let catalog = Catalog::build(
+        &std::collections::HashMap::from([("DASHSCOPE_API_KEY".to_string(), "sk".to_string())]),
+        &routes.referenced_providers(),
+        std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    let store = Arc::new(InMemoryLedger::default());
+    synapse::gateway::Gateway::builder()
+        .routes(routes)
+        .catalog(catalog)
+        .pricing(PricingTable::default())
+        .ledger(LedgerHandle::spawn(store as Arc<dyn LedgerStore>, 64))
+        .embed_routes(EmbeddingRouteTable::from_toml_str(embed_toml).unwrap())
+        .embedder("stub", Arc::new(StubEmbedder) as Arc<dyn EmbeddingProvider>)
+        .guard(
+            GuardEngine::from_config(&GuardrailsConfig::from_toml_str(guard_toml).unwrap())
+                .unwrap(),
+        )
+        .build()
+        .unwrap()
+}
+
+async fn post_embeddings(
+    gw: synapse::gateway::Gateway,
+    body: &str,
+) -> (StatusCode, serde_json::Value) {
+    let resp = router(Arc::new(gw))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/embeddings")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+const EMBED: &str = r#"
+    [embeddings."e"]
+    dimensions = 4
+    legs = [{ provider = "stub", model = "stub-embed" }]
+    [embeddings."guarded"]
+    dimensions = 4
+    policy = "strict"
+    legs = [{ provider = "stub", model = "stub-embed" }]
+"#;
+
+#[tokio::test]
+async fn embeddings_scan_each_input_under_default() {
+    let guard = r#"[guardrails.default]
+        scanners = [{ type = "token_limit", max_chars = 10 }, { type = "ban_substrings", substrings = ["forbidden"] }]"#;
+    let (ok, _) = post_embeddings(
+        guarded_embed_gateway(EMBED, guard),
+        r#"{"input":["123456","123456"],"model":"e"}"#,
+    )
+    .await;
+    assert_eq!(ok, StatusCode::OK, "each input is under the limit");
+    let (blocked, body) = post_embeddings(
+        guarded_embed_gateway(EMBED, guard),
+        r#"{"input":["fine","this is forbidden"],"model":"e"}"#,
+    )
+    .await;
+    assert_eq!(blocked, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["type"], "content_policy_violation");
+    assert!(!body.to_string().contains("this is forbidden"));
+}
+
+#[tokio::test]
+async fn embedding_route_policy_overrides_default() {
+    let guard = r#"
+        [guardrails.default]
+        scanners = [{ type = "ban_substrings", substrings = ["forbidden"] }]
+        [guardrails.strict]
+        scanners = [{ type = "ban_substrings", substrings = ["secret-word"] }]"#;
+    let (s1, _) = post_embeddings(
+        guarded_embed_gateway(EMBED, guard),
+        r#"{"input":"forbidden","model":"guarded"}"#,
+    )
+    .await;
+    assert_eq!(s1, StatusCode::OK, "guarded uses strict, not default");
+    let (s2, _) = post_embeddings(
+        guarded_embed_gateway(EMBED, guard),
+        r#"{"input":"secret-word","model":"guarded"}"#,
+    )
+    .await;
+    assert_eq!(s2, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn embeddings_without_any_policy_are_not_scanned() {
+    let guard = r#"[guardrails.other]
+        scanners = [{ type = "ban_substrings", substrings = ["forbidden"] }]"#;
+    let (s, _) = post_embeddings(
+        guarded_embed_gateway(EMBED, guard),
+        r#"{"input":"forbidden","model":"e"}"#,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+}

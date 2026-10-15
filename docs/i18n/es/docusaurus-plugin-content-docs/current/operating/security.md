@@ -64,6 +64,13 @@ tienen autenticación:
 - `POST /internal/a2a/agents` registra un agente;
 - `DELETE /internal/a2a/agents/{id}` elimina uno.
 
+Por defecto escuchan en `127.0.0.1:8081`, aparte del puerto de la API. En un host, solo los
+procesos locales pueden alcanzarlos. En Docker o Kubernetes, `127.0.0.1` es el loopback del
+propio contenedor, así que nada fuera del contenedor puede alcanzarlos. Para que los hosts de
+agentes puedan registrarse, define `SYNAPSE_ADMIN_ADDR=0.0.0.0:8081` y publica o expón ese
+puerto solo a ellos, o define `SYNAPSE_ADMIN_ADDR=shared` para servir los endpoints en el
+puerto de la API.
+
 Registrar un agente nunca sobrescribe un id existente, pero un cliente puede eliminar un agente
 y registrar otro con el mismo id y su propio endpoint. Las peticiones de los clientes que
 resuelven agentes a través del catálogo acabarían entonces en ese endpoint. Bloquea `/internal/` en tu proxy para todo
@@ -108,14 +115,16 @@ parte de la petición.
 
 ## Guardrails {#guardrails}
 
-Las [políticas de guardrails](../configuration/guardrails-policy.md) escanean los mensajes de una
-petición de chat antes de que ningún proveedor los vea. Una política en modo `block` rechaza con
-un `400` la petición que coincide, indicando la política y los escáneres que coincidieron;
-consulta [Respuesta de bloqueo](../configuration/guardrails-policy.md#block-response). Las
-políticas son una primera línea de defensa basada en patrones, no un filtro completo:
+Las [políticas de guardrails](../configuration/guardrails-policy.md) escanean el texto de todos
+los carriles (chat, passthrough de Gemini, embeddings y passthrough de Jev) antes de que ningún
+proveedor lo vea, con el `policy` de la ruta o, si no, `default`; consulta [Qué se
+escanea](../configuration/guardrails-policy.md#what-is-scanned). Una política en modo `block`
+rechaza con un `400` la petición que coincide, indicando la política y los escáneres que
+coincidieron; consulta [Respuesta de
+bloqueo](../configuration/guardrails-policy.md#block-response). Las políticas son una primera
+línea de defensa basada en patrones, no un filtro completo:
 
-- solo escanean peticiones de chat. Los passthroughs de Gemini y Jev y `/v1/embeddings` nunca se
-  escanean;
+- escanean peticiones, no respuestas;
 - una ruta sin `policy` usa la política llamada `default`, y no tiene protección si no defines
   una;
 - la respuesta de bloqueo indica al cliente qué escáneres coincidieron, lo que ayuda a un

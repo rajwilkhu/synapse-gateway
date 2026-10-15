@@ -119,7 +119,8 @@ request writes one ledger row with lane `embedding`, the serving leg's provider 
 and `output_tokens` of 0. In events published to Pub/Sub or SNS, the row has
 `op = "embedding"`. See [Cost ledger](cost-ledger.md).
 
-Guardrails do not scan embedding requests.
+Each `input` item is scanned under the alias's `policy`, else `default`, before the first
+leg; see [What is scanned](../configuration/guardrails-policy.md#what-is-scanned).
 
 ## Metrics
 

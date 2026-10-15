@@ -65,6 +65,17 @@ Guarda los precios como `config/pricing.toml`:
 Los precios están en USD por 1,000,000 de tokens, indexados por `provider:model`. Synapse
 los usa para valorar cada petición en el registro de costes; un modelo sin precio cuesta 0.
 
+Guarda los guardrails como `config/guardrails.toml`:
+
+```toml title="config/guardrails.toml"
+[guardrails.default]
+scanners = ["prompt_injection", "secrets"]
+```
+
+Una ruta sin `policy` se escanea con `default`, así que ambas rutas bloquean la inyección de
+prompts y los secretos filtrados. El gateway no arranca sin este archivo; consulta
+[Política de guardrails](../configuration/guardrails-policy.md).
+
 ## Arrancar el gateway {#start-the-gateway}
 
 El gateway se ejecuta en primer plano. Déjalo funcionando y envía las peticiones del resto
@@ -109,8 +120,7 @@ peticiones sin registrarlas.
 :::
 
 Montar `config/` sustituye todo el directorio `/app/config` de la imagen, así que solo se
-usan los archivos que aportes. Los guardrails siguen desactivados hasta que añadas un
-`guardrails.toml`.
+usan los archivos que aportes.
 
 ### Cargo {#cargo}
 
@@ -122,6 +132,7 @@ gcloud auth application-default login
 export VERTEX_PROJECT_ID=my-gcp-project
 export OPENAI_API_KEY=sk-...
 SYNAPSE_ROUTES_PATH=config/routes.toml SYNAPSE_PRICING_PATH=config/pricing.toml \
+  SYNAPSE_GUARDRAILS_PATH=config/guardrails.toml \
   SYNAPSE_LEDGER_SQLITE_DSN="sqlite://data/synapse.db?mode=rwc" \
   synapse-gateway
 ```

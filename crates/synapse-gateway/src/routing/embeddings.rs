@@ -7,6 +7,8 @@ use std::collections::{HashMap, HashSet};
 struct EmbeddingEntry {
     dimensions: u32,
     legs: Vec<ChainLeg>,
+    #[serde(default)]
+    policy: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -41,6 +43,22 @@ impl EmbeddingRouteTable {
         self.routes.get(alias).map(|e| e.dimensions)
     }
 
+    /// Guardrails policy named by an embedding alias, or `None` when unset.
+    pub fn policy_of(&self, alias: &str) -> Option<&str> {
+        self.routes.get(alias).and_then(|e| e.policy.as_deref())
+    }
+
+    /// Every `(alias, policy)` pair an embedding alias names, sorted by alias.
+    pub fn route_policies(&self) -> Vec<(&str, &str)> {
+        let mut v: Vec<(&str, &str)> = self
+            .routes
+            .iter()
+            .filter_map(|(a, e)| e.policy.as_deref().map(|p| (a.as_str(), p)))
+            .collect();
+        v.sort();
+        v
+    }
+
     pub fn aliases(&self) -> Vec<String> {
         let mut v: Vec<String> = self.routes.keys().cloned().collect();
         v.sort();
@@ -65,6 +83,7 @@ impl EmbeddingRouteTable {
                     EmbeddingEntry {
                         dimensions: entry.dimensions,
                         legs,
+                        policy: entry.policy.clone(),
                     },
                 )
             })
@@ -157,5 +176,28 @@ mod tests {
             legs = []
         "#;
         assert!(EmbeddingRouteTable::from_toml_str(bad).is_err());
+    }
+    #[test]
+    fn embedding_policy_is_parsed_and_survives_provider_pruning() {
+        let table = EmbeddingRouteTable::from_toml_str(
+            r#"
+            [embeddings."guarded"]
+            dimensions = 768
+            policy = "secrets_only"
+            legs = [
+              { provider = "vertex", model = "text-embedding-004" },
+              { provider = "openai", model = "text-embedding-3-small" },
+            ]
+            [embeddings."plain"]
+            dimensions = 768
+            legs = [{ provider = "vertex", model = "text-embedding-004" }]
+        "#,
+        )
+        .unwrap();
+        assert_eq!(table.policy_of("guarded"), Some("secrets_only"));
+        assert_eq!(table.policy_of("plain"), None);
+        assert_eq!(table.route_policies(), vec![("guarded", "secrets_only")]);
+        let pruned = table.without_providers(&HashSet::from(["openai".to_string()]));
+        assert_eq!(pruned.policy_of("guarded"), Some("secrets_only"));
     }
 }

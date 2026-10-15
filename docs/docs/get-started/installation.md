@@ -23,14 +23,16 @@ and `docker run`, and Docker runs them under emulation.
 
 The image:
 
-- listens on port `8080` for the API and port `9090` for Prometheus metrics;
+- listens on port `8080` for the API and port `9090` for Prometheus metrics, and serves the
+  A2A admin endpoints on `127.0.0.1:8081`, the container's own loopback (see
+  [Docker](../deployment/docker.md#ports));
 - runs as the non-root user `synapse` (UID 1001), which has no home directory;
 - uses `/app` as its working directory and reads configuration from `/app/config`;
 - includes every ledger backend (SQLite, Postgres, Pub/Sub and SNS).
 
 The image ships with the default configuration from
 [`crates/synapse-gateway/config/`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/config).
-Mount your own directory over `/app/config` to supply your routes and pricing:
+Mount your own directory over `/app/config` to supply your routes, pricing and guardrails:
 
 ```bash
 docker run --rm -p 8080:8080 -p 9090:9090 \

@@ -5,7 +5,8 @@ description: Register and remove A2A agents at runtime through the gateway's /in
 ---
 
 Agent hosts use the admin API to add their agents to the registry when they start, and to
-remove them when they stop. The endpoints are on the gateway's API port.
+remove them when they stop. The endpoints are on the admin listener, `SYNAPSE_ADMIN_ADDR`
+(default `127.0.0.1:8081`); with `shared` they are on the API port.
 
 :::warning
 The admin endpoints have no authentication. Anyone who can reach them can remove an agent
@@ -19,7 +20,7 @@ register agents; see
 Registers an agent if its id isn't registered yet.
 
 ```bash
-curl -s -X POST localhost:8080/internal/a2a/agents \
+curl -s -X POST localhost:8081/internal/a2a/agents \
   -H 'Content-Type: application/json' \
   -d @agent.json
 ```
@@ -68,8 +69,8 @@ earlier `POST`, the request is ignored and still returns `204`. The existing ent
 expiry, are kept. To replace an agent, delete it first:
 
 ```bash
-curl -s -X DELETE localhost:8080/internal/a2a/agents/invoice-agent
-curl -s -X POST localhost:8080/internal/a2a/agents -H 'Content-Type: application/json' -d @agent.json
+curl -s -X DELETE localhost:8081/internal/a2a/agents/invoice-agent
+curl -s -X POST localhost:8081/internal/a2a/agents -H 'Content-Type: application/json' -d @agent.json
 ```
 
 An expired agent is only removed the next time the catalogue is listed or the agent is looked

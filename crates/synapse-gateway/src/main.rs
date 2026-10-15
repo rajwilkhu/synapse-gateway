@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use tracing_subscriber::{fmt, EnvFilter};
 
 use synapse::ai_task_type::AiTaskTypeTable;
-use synapse::config::{vertex_project_from_env, Config, ProviderValidation};
+use synapse::config::{vertex_project_from_env, AdminAddr, Config, ProviderValidation};
 use synapse::embeddings::openai::OpenAiEmbedder;
 use synapse::embeddings::vertex::VertexEmbedder;
 use synapse::embeddings::EmbeddingProvider;
@@ -16,7 +16,7 @@ use synapse::providers::vertex_auth::VertexAuth;
 use synapse::providers::{unsatisfiable_providers, Catalog};
 use synapse::routing::embeddings::EmbeddingRouteTable;
 use synapse::routing::table::RouteTable;
-use synapse::server::router;
+use synapse::server::apps;
 use synapse::vertex_native::VertexNativeProvider;
 
 #[tokio::main]
@@ -117,15 +117,31 @@ async fn main() -> Result<()> {
         AiTaskTypeTable::default()
     };
 
-    // Optional guardrails: absent file ⇒ empty engine (guardrails off).
-    let guard = if std::path::Path::new(&config.guardrails_path).exists() {
+    let guardrails = if std::path::Path::new(&config.guardrails_path).exists() {
         let content = std::fs::read_to_string(&config.guardrails_path)
             .with_context(|| format!("reading {}", config.guardrails_path))?;
-        let cfg = synapse::guard::GuardrailsConfig::from_toml_str(&content)?;
-        synapse::guard::GuardEngine::from_config(&cfg)?
+        Some(synapse::guard::GuardrailsConfig::from_toml_str(&content)?)
     } else {
-        synapse::guard::GuardEngine::empty()
+        None
     };
+    synapse::guard::validate_guardrails(
+        config.guardrails_mode,
+        &config.guardrails_path,
+        guardrails.as_ref(),
+        &routes,
+        &embed_routes,
+    )?;
+    let guard = guardrails
+        .as_ref()
+        .map(synapse::guard::GuardEngine::from_config)
+        .transpose()?
+        .unwrap_or_else(synapse::guard::GuardEngine::empty);
+    tracing::info!(
+        guardrails = ?config.guardrails_mode,
+        passthrough_models = ?config.passthrough_models,
+        admin_addr = ?config.admin_addr,
+        "guard settings"
+    );
 
     // Fail-fast: build every referenced provider's client + validate creds.
     let catalog = Catalog::build(&env, &routes.referenced_providers(), config.request_timeout)?;
@@ -212,6 +228,7 @@ async fn main() -> Result<()> {
         })
         .default_tenant(config.default_tenant.clone())
         .guard(guard)
+        .passthrough_models(config.passthrough_models)
         .embed_routes(embed_routes)
         .embed_default_input_per_mtok(config.embed_default_input_per_mtok)
         .metrics(metrics);
@@ -220,10 +237,8 @@ async fn main() -> Result<()> {
         .fold(builder, |b, (id, e)| b.embedder(id, e))
         .build()?;
 
-    // A2A registry is a process-lifetime in-memory catalog. Admin + public
-    // routers carry their own state; merge onto the LLM app so marketplace /
-    // ploutonion hit the same stable :8080 service (not the sandbox broker).
-    // Static seed is optional, like guardrails: absent file ⇒ empty registry.
+    // A2A registry is a process-lifetime in-memory catalog.
+    // Static seed is optional, like guardrails: absent file => empty registry.
     let a2a_registry = Arc::new(synapse_a2a::A2aRegistry::new());
     if std::path::Path::new(&config.a2a_path).exists() {
         synapse_a2a::seed_from_path(&a2a_registry, &config.a2a_path)
@@ -235,9 +250,22 @@ async fn main() -> Result<()> {
             "a2a seed file absent; starting with empty A2A registry"
         );
     }
-    let app = router(Arc::new(gateway))
-        .merge(synapse_a2a::a2a_admin_router(a2a_registry.clone()))
-        .merge(synapse_a2a::a2a_public_router(a2a_registry));
+    let (app, admin_app) = apps(
+        Arc::new(gateway),
+        a2a_registry,
+        config.admin_addr == AdminAddr::Shared,
+    );
+    if let (Some(admin_app), AdminAddr::Listen(addr)) = (admin_app, &config.admin_addr) {
+        let admin_listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("binding SYNAPSE_ADMIN_ADDR '{addr}'"))?;
+        tracing::info!(addr = %addr, "synapse-gateway admin listening");
+        tokio::spawn(async move {
+            axum::serve(admin_listener, admin_app)
+                .await
+                .unwrap_or_else(|e| tracing::error!(error = %e, "admin server stopped"));
+        });
+    }
 
     tracing::info!(addr = %config.addr, "synapse-gateway listening");
     let listener = tokio::net::TcpListener::bind(&config.addr).await?;
