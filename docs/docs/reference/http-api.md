@@ -65,6 +65,7 @@ Chat completion responses carry the routing report.
 | `x-synapse-tier-decided` | The tier Jev chose, when a different tier served. |
 | `x-synapse-reasoning-effort` | The serving leg's effort, or `client` when the request set its own. |
 | `x-synapse-routing-degraded` | `timeout`, `error`, `low_confidence` or `jev_unavailable`. |
+| `x-synapse-guard` | `masked` when a guardrail policy rewrote text in the request. Present on chat completions (streaming or not), embeddings, the Gemini passthrough and the Jev passthrough. On a non-streaming chat completion, also `masked` when output scanning rewrote the reply, and `blocked` when it blocked the reply. See [Actions and masking](../configuration/guardrails-policy.md#actions-and-masking) and [Output scanning](../configuration/guardrails-policy.md#output-scanning). |
 
 ## Errors
 
@@ -88,6 +89,7 @@ Gateway errors are JSON in the OpenAI shape:
 | `404` | `model_not_found` | The `model` is not a chat route alias (chat) or an embedding alias (embeddings). |
 | `502` | `all_legs_failed` | Every leg failed. A `failures` array lists each leg's `provider`, `model` and `message`. See [When every leg fails](../guides/fallback-chains.md#when-every-leg-fails). |
 | `502` | `upstream_error` | A provider failed where no further fallback was possible, such as the last native Vertex leg or an embedding leg. |
+| `503` | `guard_unavailable` | A guardrail classifier gave no answer under `on_error = "block"` in `block` mode. See [Classifier](../configuration/guardrails-policy.md#classifier). |
 
 The `message` is human-readable and can change between versions; match on `code`. A body that
 isn't valid JSON, or doesn't match the endpoint's schema, is rejected before it reaches the
@@ -171,8 +173,9 @@ A non-streaming request returns a `chat.completion`:
 - `id` is `chatcmpl-` followed by the request id: the `x-synapse-message` header, or a
   generated UUID.
 - `model` is the model of the leg that served the request, not the route alias.
-- `finish_reason` is `stop`, `length` or `tool_calls`. A tool call has `content: null` and a
-  `tool_calls` array.
+- `finish_reason` is `stop`, `length`, `tool_calls` or `content_filter`. A tool call has
+  `content: null` and a `tool_calls` array. `content_filter` means output scanning blocked the
+  reply, and `content` is `""`.
 - A [hybrid extraction](../guides/jev-lane.md#hybrid-extraction) response adds a `jev` object
   with `answers`, `survivors` and `degraded`.
 
@@ -192,6 +195,11 @@ data: [DONE]
 Chunks carry no `usage` and `created` is always `0`. A failure after the first chunk arrives as
 an event whose body is an error object, followed by `[DONE]`; see
 [Fallback while streaming](../guides/streaming-and-tools.md#fallback-while-streaming).
+
+When output scanning blocks a streamed reply, the stream ends with a chunk whose
+`finish_reason` is `content_filter`, then an error event with `type`
+`content_policy_violation`, `code` `content_blocked` and the blocking `scanners`, then
+`[DONE]`. See [Output scanning](../configuration/guardrails-policy.md#streaming-responses).
 
 ## `POST /v1/embeddings`
 
@@ -228,7 +236,8 @@ AI with the gateway's credentials.
   returns `502` with code `upstream_error`. If the gateway has no Vertex AI project configured,
   the endpoint returns `400`.
 
-Generation requests are scanned under the matched route's policy, else `default` (see [What is
+Every action except `countTokens` and `computeTokens` is scanned under the route's policy,
+else `default`, and a model id under the policy of every route that lists it (see [What is
 scanned](../configuration/guardrails-policy.md#what-is-scanned)). With
 `SYNAPSE_PASSTHROUGH_MODELS=routed` (the default), a model that is neither a route alias nor a
 `vertex` leg gets `404`. The gateway's own errors on this endpoint use Google's error shape.

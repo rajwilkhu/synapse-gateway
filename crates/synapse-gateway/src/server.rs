@@ -57,6 +57,22 @@ pub fn apps(
     }
 }
 
+/// `request_ctx` with its request id resolved once (the caller's, else a
+/// fresh UUID), so the guard row and the lane's usage row share it.
+fn stamped_ctx(headers: &HeaderMap) -> (RequestCtx, String) {
+    let ctx = request_ctx(headers);
+    let request_id = ctx
+        .resolved_request_id()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    (
+        RequestCtx {
+            request_id: Some(request_id.clone()),
+            ..ctx
+        },
+        request_id,
+    )
+}
+
 fn request_ctx(headers: &HeaderMap) -> RequestCtx {
     let header = |name: &str| {
         headers
@@ -143,8 +159,17 @@ async fn embeddings(
     Json(req): Json<crate::embeddings::EmbeddingRequest>,
 ) -> Result<Response, GatewayError> {
     let ctx = request_ctx(&headers);
-    let resp = st.gateway.embed(req, ctx).await?;
-    Ok(Json(resp).into_response())
+    let (resp, decision) = st.gateway.embed_routed(req, ctx).await?;
+    Ok(with_guard_header(Json(resp).into_response(), &decision))
+}
+
+/// Adds `x-synapse-guard: masked` when the screen rewrote the request.
+fn with_guard_header(mut resp: Response, d: &crate::guard::GuardDecision) -> Response {
+    if d.masked {
+        resp.headers_mut()
+            .insert("x-synapse-guard", HeaderValue::from_static("masked"));
+    }
+    resp
 }
 
 /// Gemini-native passthrough (`POST .../models/{model}:{action}`). The
@@ -213,6 +238,19 @@ fn google_status(status: axum::http::StatusCode) -> &'static str {
     }
 }
 
+/// Passthrough actions that send no content upstream to a model and are
+/// forwarded unscanned. Every other action is guarded.
+const NON_CONTENT_ACTIONS: &[&str] = &["countTokens", "computeTokens"];
+
+/// Passthrough actions whose body is a Gemini request read by
+/// `gemini_leaves`. Any other guarded action scans every string in its body.
+const GEMINI_BODY_ACTIONS: &[&str] = &[
+    "generateContent",
+    "streamGenerateContent",
+    "embedContent",
+    "batchEmbedContents",
+];
+
 /// Rejects a path model outside `[A-Za-z0-9._-]+` or an action outside
 /// `[A-Za-z]+`, so neither can change the upstream URL's path or query.
 fn check_model_action(model: &str, action: &str) -> Result<(), GatewayError> {
@@ -239,11 +277,8 @@ async fn forward_gemini(
     axum::extract::Path(model_action): axum::extract::Path<String>,
     axum::extract::RawQuery(query): axum::extract::RawQuery,
     headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
+    Json(mut body): Json<serde_json::Value>,
 ) -> Result<Response, GatewayError> {
-    use axum::body::Body;
-    use axum::http::{header, StatusCode};
-
     let provider = st
         .gateway
         .vertex_native
@@ -275,7 +310,14 @@ async fn forward_gemini(
         )));
     };
 
-    // countTokens etc.: pure single forward, no chain / metering.
+    let (ctx, request_id) = stamped_ctx(&headers);
+    let decision = if NON_CONTENT_ACTIONS.contains(&action) {
+        crate::guard::GuardDecision::default()
+    } else {
+        screen_gemini(&st, model, action, &mut body, &ctx, &request_id).await?
+    };
+
+    // Non-generation actions: pure single forward, no chain / metering.
     if !metered {
         let resp = provider
             .passthrough_request(
@@ -294,20 +336,62 @@ async fn forward_gemini(
             status: 502,
             body: e.to_string(),
         })?;
-        return passthrough_response(status.as_u16(), "application/json", bytes);
+        return passthrough_response(status.as_u16(), "application/json", bytes)
+            .map(|r| with_guard_header(r, &decision));
     }
 
-    let policy = chain
-        .route
-        .as_deref()
-        .and_then(|r| st.gateway.routes.policy_of(r));
-    st.gateway.guard_lane(
-        policy,
-        crate::guard::GuardLane::Passthrough,
-        &crate::guard::segments::gemini_segments(&body),
-    )?;
+    forward_gemini_legs(&st, &ctx, provider, chain, action, streaming, alt_sse, body)
+        .await
+        .map(|r| with_guard_header(r, &decision))
+}
 
-    let ctx = request_ctx(&headers);
+/// Screens a Gemini passthrough body under every policy of the routes that
+/// list `model` (see `RouteTable::passthrough_policies`), in place. The
+/// request is masked when any policy masked it.
+async fn screen_gemini(
+    st: &AppState,
+    model: &str,
+    action: &str,
+    body: &mut serde_json::Value,
+    ctx: &RequestCtx,
+    request_id: &str,
+) -> Result<crate::guard::GuardDecision, GatewayError> {
+    let mut decision = crate::guard::GuardDecision::default();
+    for policy in st.gateway.routes.passthrough_policies(model) {
+        let leaves = if GEMINI_BODY_ACTIONS.contains(&action) {
+            crate::guard::leaves::gemini_leaves(body)
+        } else {
+            crate::guard::leaves::body_leaves(body)
+        };
+        let d = st
+            .gateway
+            .guard_lane(
+                Some(policy),
+                crate::guard::GuardLane::Passthrough,
+                leaves,
+                ctx,
+                request_id,
+            )
+            .await?;
+        decision.masked |= d.masked;
+    }
+    Ok(decision)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn forward_gemini_legs(
+    st: &AppState,
+    ctx: &RequestCtx,
+    provider: Arc<crate::vertex_native::VertexNativeProvider>,
+    chain: crate::routing::table::VertexPassthroughChain,
+    action: &str,
+    streaming: bool,
+    alt_sse: bool,
+    body: serde_json::Value,
+) -> Result<Response, GatewayError> {
+    use axum::body::Body;
+    use axum::http::{header, StatusCode};
+
     let route_alias = chain.route.as_deref();
     let mut prev_model: Option<String> = None;
     let mut last_failure: Option<(u16, axum::body::Bytes)> = None;
@@ -330,7 +414,7 @@ async fn forward_gemini(
         let resp = match attempt {
             Ok(r) => r,
             Err(e) => {
-                meter_passthrough_error(&st.gateway, &ctx, &leg.model, route_alias);
+                meter_passthrough_error(&st.gateway, ctx, &leg.model, route_alias);
                 st.gateway
                     .metrics
                     .passthrough("vertex", &leg.model, action, false);
@@ -350,7 +434,7 @@ async fn forward_gemini(
         if status.is_success() {
             let mut guard = PassthroughUsageGuard::new(
                 &st.gateway,
-                &ctx,
+                ctx,
                 &leg.model,
                 route_alias,
                 "vertex",
@@ -391,7 +475,7 @@ async fn forward_gemini(
         }
 
         let bytes = resp.bytes().await.unwrap_or_default();
-        meter_passthrough_error(&st.gateway, &ctx, &leg.model, route_alias);
+        meter_passthrough_error(&st.gateway, ctx, &leg.model, route_alias);
 
         if passthrough_status_retryable(status) && i + 1 < chain.legs.len() {
             prev_model = Some(leg.model.clone());
@@ -445,15 +529,31 @@ async fn jev_passthrough(
         .as_str()
         .unwrap_or(crate::jev_native::DEFAULT_MODEL)
         .to_string();
-    st.gateway.guard_lane(
-        None,
-        crate::guard::GuardLane::Jev,
-        &crate::guard::segments::jev_segments(&body),
-    )?;
+    let (ctx, request_id) = stamped_ctx(&headers);
+    let decision = st
+        .gateway
+        .guard_lane(
+            None,
+            crate::guard::GuardLane::Jev,
+            crate::guard::leaves::jev_leaves(&mut body),
+            &ctx,
+            &request_id,
+        )
+        .await?;
+    forward_jev(&st, &ctx, provider, &model, body)
+        .await
+        .map(|r| with_guard_header(r, &decision))
+}
 
-    let ctx = request_ctx(&headers);
+async fn forward_jev(
+    st: &AppState,
+    ctx: &RequestCtx,
+    provider: Arc<crate::jev_native::JevNativeProvider>,
+    model: &str,
+    body: serde_json::Value,
+) -> Result<Response, GatewayError> {
     let mut guard =
-        PassthroughUsageGuard::new(&st.gateway, &ctx, &model, None, "typesafe", "systemone");
+        PassthroughUsageGuard::new(&st.gateway, ctx, model, None, "typesafe", "systemone");
 
     let resp = match provider.evaluate(body).await {
         Ok(r) => r,
@@ -466,7 +566,7 @@ async fn jev_passthrough(
     let status = resp.status();
     st.gateway
         .metrics
-        .passthrough("typesafe", &model, "systemone", status.is_success());
+        .passthrough("typesafe", model, "systemone", status.is_success());
 
     if status.is_success() {
         let bytes = resp.bytes().await.map_err(|e| {

@@ -312,6 +312,35 @@ impl RouteTable {
         }
     }
 
+    /// The guard policies a Gemini passthrough request for `model` is screened
+    /// under, sorted and distinct. A non-`jev` route alias gives its own policy;
+    /// a model id gives the policy of every non-`jev` route with a `vertex` leg
+    /// for it. A route without a policy, or a model no route lists, gives
+    /// `default`.
+    pub fn passthrough_policies(&self, model: &str) -> Vec<&str> {
+        let policy = |alias: &str| self.policy_of(alias).unwrap_or("default");
+        if !self.jev_declared.contains(model) && self.routes.contains_key(model) {
+            return vec![policy(model)];
+        }
+        let mut v: Vec<&str> = self
+            .routes
+            .iter()
+            .filter(|(alias, legs)| {
+                !self.jev_declared.contains(*alias)
+                    && legs
+                        .iter()
+                        .any(|l| l.provider == "vertex" && l.model == model)
+            })
+            .map(|(alias, _)| policy(alias))
+            .collect();
+        if v.is_empty() {
+            v.push("default");
+        }
+        v.sort();
+        v.dedup();
+        v
+    }
+
     /// Consecutive Vertex legs for Gemini-native passthrough fallback.
     ///
     /// Prefer a route whose first leg is `vertex` + `model` (lexicographically
@@ -724,6 +753,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(t.vertex_fallback_chain("tiered").route, None);
+    }
+
+    #[test]
+    fn passthrough_policies_cover_every_route_listing_a_model() {
+        let t = RouteTable::from_toml_str(
+            r#"
+            [routes."aaa"]
+            legs = [{ provider = "vertex", model = "gemini-x" }]
+            [routes."chat"]
+            policy = "strict"
+            legs = [{ provider = "qwen", model = "qwen-max" }, { provider = "vertex", model = "gemini-x" }]
+            [routes."other"]
+            policy = "strict"
+            legs = [{ provider = "vertex", model = "gemini-x" }]
+        "#,
+        )
+        .unwrap();
+        assert_eq!(t.passthrough_policies("gemini-x"), ["default", "strict"]);
+        assert_eq!(t.passthrough_policies("chat"), ["strict"]);
+        assert_eq!(t.passthrough_policies("aaa"), ["default"]);
+        assert_eq!(t.passthrough_policies("unknown"), ["default"]);
     }
 
     #[test]

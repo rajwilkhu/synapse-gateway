@@ -297,3 +297,32 @@ async fn jev_passthrough_does_not_scan_numbers_or_keys() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn masked_jev_state_reaches_the_upstream_redacted_and_is_signalled() {
+    const SECRET: &str = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(SYSTEMONE_PATH))
+        .and(body_string_contains("[REDACTED:secrets]"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({"answers": {}, "usage": {"input_tokens": 1, "output_tokens": 1}}),
+        ))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    let gw = guarded_jev_gateway(
+        &mock.uri(),
+        r#"[guardrails.default]
+           scanners = [{ type = "secrets", action = "mask" }]"#,
+    );
+    let body = serde_json::json!({"state": {"ticket": SECRET}, "questions": {}});
+    let resp = router(Arc::new(gw))
+        .oneshot(jev_request(body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["x-synapse-guard"], "masked");
+    let seen = &mock.received_requests().await.unwrap()[0];
+    assert!(!String::from_utf8_lossy(&seen.body).contains(SECRET));
+}

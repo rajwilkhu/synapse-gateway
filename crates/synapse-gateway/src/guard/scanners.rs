@@ -5,9 +5,10 @@
 use anyhow::{bail, Context};
 use llm_guard::patterns::COMMON_INJECTION_PATTERNS;
 use llm_guard::scanners::{
-    BanSubstrings, InvisibleText, PiiPatterns, RoleOverride, ScriptMix, Secrets, TokenLimit,
+    BanSubstrings, InvisibleText, PiiPatterns, RegexPattern, RegexScan, RoleOverride, ScriptMix,
+    Secrets, TokenLimit,
 };
-use llm_guard::{ScanResult, Scanner, Severity};
+use llm_guard::{Confidence, ScanResult, Scanner, Severity};
 
 use super::policy::{DetailedScanner, ScannerSpec};
 
@@ -53,10 +54,58 @@ pub fn build_scanners(spec: &ScannerSpec) -> anyhow::Result<Vec<Box<dyn Scanner>
     }
 }
 
+fn block_pattern(id: &'static str, pat: &str) -> anyhow::Result<RegexPattern> {
+    Ok(RegexPattern::new(id, pat)?
+        .with_severity(Severity::Block)
+        .with_confidence(Confidence::High))
+}
+
+/// Deterministic isolation-bypass signals: forging tenant identity headers,
+/// naming internal cluster hosts, or curling/wgetting those hosts directly.
+/// A header counts as set when its name is followed by `:`/`=` (curl `-H`,
+/// dict/object literals), by `] =` (subscript assignment), or is the first
+/// argument of a setter call (`set`, `append`, `header`, ...). Header reads
+/// and comma-separated name lists do not match.
+fn isolation_bypass_scanner() -> anyhow::Result<RegexScan> {
+    let patterns = vec![
+        block_pattern(
+            "forged_identity_header",
+            r#"(?i)(?:^|[^a-z0-9-])x-(?:tenant|workspace|user|agent)-id(?:["']?\s*[:=]|["']\s*\]\s*=)|\b(?:set|append|add|put|insert|header|setheader|set_header|add_header)\s*\(\s*["']x-(?:tenant|workspace|user|agent)-id["']\s*,"#,
+        )?,
+        block_pattern(
+            "internal_host",
+            r"(?i)[a-z0-9.-]+\.svc\.cluster(?:set)?\.local",
+        )?,
+        block_pattern(
+            "direct_internal_call",
+            r"(?i)\b(?:curl|wget)\b[^\n]*\.svc\.cluster(?:set)?\.local",
+        )?,
+    ];
+    Ok(RegexScan::new("isolation_bypass", patterns))
+}
+
+/// Deterministic unbounded-view signals: a recursive flag in content that
+/// calls `/fs/ls`, or a cortex URI scoped at a bare tenant/workspace root.
+fn data_exfil_scanner() -> anyhow::Result<RegexScan> {
+    let patterns = vec![
+        block_pattern(
+            "recursive_listing",
+            r#"(?is)/fs/ls\b.*?recursive["'\s]*[:=]\s*["']?true\b|recursive["'\s]*[:=]\s*["']?true\b.*?/fs/ls\b"#,
+        )?,
+        block_pattern(
+            "root_scope",
+            r#"(?m)cortex://[^/\s"']+/[^/\s"']+/(?:[^A-Za-z0-9._~%-]|$)"#,
+        )?,
+    ];
+    Ok(RegexScan::new("data_exfil", patterns))
+}
+
 fn build(name: &str, d: Option<&DetailedScanner>) -> anyhow::Result<Vec<Box<dyn Scanner>>> {
     let scanners: Vec<Box<dyn Scanner>> = match name {
         "secrets" => vec![Box::new(Secrets::new())],
         "pii" => vec![Box::new(PiiPatterns::new())],
+        "isolation_bypass" => vec![Box::new(isolation_bypass_scanner()?)],
+        "data_exfil" => vec![Box::new(data_exfil_scanner()?)],
         "invisible_text" => vec![Box::new(InvisibleText::new())],
         "role_override" => vec![Box::new(RoleOverride::new())],
         "script_mix" => {
@@ -154,5 +203,113 @@ mod tests {
         );
         let err = build_scanners(&s).err().expect("expected an error");
         assert!(err.to_string().contains("unknown scanner"));
+    }
+
+    #[test]
+    fn isolation_bypass_flags_forged_header_and_internal_host() {
+        let built = build("isolation_bypass", None).unwrap();
+        assert_eq!(built.len(), 1);
+        let s = &built[0];
+        assert_eq!(s.name(), "isolation_bypass");
+        assert!(s
+            .scan(r#"curl -H "X-Tenant-Id: org-123" https://x"#)
+            .should_refuse());
+        assert!(s
+            .scan("http://cortex-server.infrastructure.svc.clusterset.local/health")
+            .should_refuse());
+        assert!(s
+            .scan(r#"requests.get("http://cortex.infra.SVC.Cluster.Local/x")"#)
+            .should_refuse());
+    }
+
+    #[test]
+    fn isolation_bypass_flags_header_set_from_code() {
+        let s = &build("isolation_bypass", None).unwrap()[0];
+        assert!(s.scan(r#"headers={"X-Tenant-Id": org}"#).should_refuse());
+        assert!(s
+            .scan(r#"fetch(u, {headers: {'X-Workspace-Id': ws}})"#)
+            .should_refuse());
+    }
+
+    #[test]
+    fn isolation_bypass_flags_header_setter_calls() {
+        let s = &build("isolation_bypass", None).unwrap()[0];
+        assert!(s.scan(r#"headers["X-Tenant-Id"] = org"#).should_refuse());
+        assert!(s
+            .scan(r#"req.headers.set("X-Tenant-Id", v)"#)
+            .should_refuse());
+        assert!(s.scan(r#"h.Set('X-User-Id', v)"#).should_refuse());
+        assert!(s.scan(r#".header("X-Agent-Id", id)"#).should_refuse());
+    }
+
+    #[test]
+    fn isolation_bypass_ignores_header_name_list_in_prose() {
+        let s = &build("isolation_bypass", None).unwrap()[0];
+        assert!(!s
+            .scan("Supported headers: X-Tenant-Id, X-Workspace-Id and more.")
+            .flagged());
+        assert!(!s
+            .scan("allowed headers: 'X-Tenant-Id', 'X-Workspace-Id'")
+            .flagged());
+    }
+
+    #[test]
+    fn isolation_bypass_ignores_longer_names_and_header_reads() {
+        let s = &build("isolation_bypass", None).unwrap()[0];
+        assert!(!s.scan("max-user-id=5").flagged());
+        assert!(!s.scan("inbox-user-id: 3").flagged());
+        assert!(!s.scan(r#"headers.get("X-Tenant-Id", fallback)"#).flagged());
+    }
+
+    #[test]
+    fn isolation_bypass_ignores_plain_prose() {
+        let s = &build("isolation_bypass", None).unwrap()[0];
+        assert!(!s
+            .scan("This skill summarises the tenant onboarding flow.")
+            .flagged());
+    }
+
+    // A literal header token in prose also matches.
+    #[test]
+    fn isolation_bypass_flags_header_token_even_in_prose() {
+        let s = &build("isolation_bypass", None).unwrap()[0];
+        assert!(s
+            .scan("Set the X-Tenant-Id: header before calling.")
+            .should_refuse());
+    }
+
+    #[test]
+    fn data_exfil_flags_recursive_listing_and_root_scope() {
+        let s = &build("data_exfil", None).unwrap()[0];
+        assert_eq!(s.name(), "data_exfil");
+        assert!(s
+            .scan("curl -G \"$CX/api/v1/fs/ls\" \\\n  --data-urlencode \"recursive=true\"")
+            .should_refuse());
+        assert!(s
+            .scan(r#"requests.get(f"{cx}/api/v1/fs/ls", params={"recursive": "true"})"#)
+            .should_refuse());
+        assert!(s.scan(r#"uri=cortex://$ORG/$WS/""#).should_refuse());
+        for root in [
+            "fetch(cortex://org/ws/)",
+            "cortex://org/ws/, then",
+            "see\ncortex://org/ws/\nnext",
+        ] {
+            assert!(s.scan(root).should_refuse(), "{root}");
+        }
+    }
+
+    #[test]
+    fn data_exfil_ignores_recursive_flag_without_fs_ls() {
+        let s = &build("data_exfil", None).unwrap()[0];
+        assert!(!s.scan(r#"glob.glob("**/*.md", recursive=True)"#).flagged());
+        assert!(!s.scan("fs.mkdirSync(p, {recursive: true})").flagged());
+    }
+
+    #[test]
+    fn data_exfil_ignores_bounded_deep_path_read() {
+        let s = &build("data_exfil", None).unwrap()[0];
+        assert!(!s
+            .scan(r#"uri=cortex://org/ws/agent/a1/skills/run.sh"#)
+            .flagged());
     }
 }

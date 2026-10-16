@@ -81,13 +81,16 @@ cuentan las peticiones con éxito, y la duración cubre únicamente el tramo que
 
 | Métrica | Tipo | Unidad | Etiquetas |
 |---|---|---|---|
-| `synapse_guard_scans_total` | Counter | escaneos | `lane`, `policy`, `outcome` |
-| `synapse_guard_matches_total` | Counter | coincidencias | `lane`, `policy`, `scanner`, `severity` |
-| `synapse_guard_scan_duration_seconds` | Histogram | segundos | `lane`, `policy` |
+| `synapse_guard_scans_total` | Counter | escaneos | `lane`, `direction`, `policy`, `outcome` |
+| `synapse_guard_matches_total` | Counter | coincidencias | `lane`, `direction`, `policy`, `scanner`, `severity` |
+| `synapse_guard_scan_duration_seconds` | Histogram | segundos | `lane`, `direction`, `policy` |
+| `synapse_guard_classifier_score` | Histogram | puntuación | `policy`, `question` |
 
-`lane` es `chat`, `passthrough`, `embeddings` o `jev`, un conjunto de valores distinto del de
-la etiqueta `lane` de `synapse_requests_total` (`standard`, `native` o `jev`). `outcome` es
-`pass`, `flag`, `block` u `observe`; `severity` es `block`, `warn` o `info`.
+`lane` es `chat`, `passthrough`, `embeddings`, `jev` o `write` (solo para quien usa la biblioteca), un conjunto de valores distinto del de
+la etiqueta `lane` de `synapse_requests_total` (`standard`, `native` o `jev`). `direction` es `input`,
+u `output` para las respuestas de chat revisadas por `output_scanners`, con un escaneo por respuesta. `outcome` es
+`pass`, `flag`, `masked`, `block`, `observe` o `classifier_error`; `severity` es `block`, `warn` o `info`.
+`question` es el nombre de una pregunta del clasificador.
 Consulta [Política de guardrails](../configuration/guardrails-policy.md#metrics).
 
 ### Registro de costes {#cost-ledger}

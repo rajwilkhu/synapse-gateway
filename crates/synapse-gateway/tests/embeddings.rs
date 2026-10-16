@@ -111,6 +111,14 @@ async fn http_embeddings_returns_list_and_records_ledger() {
 use synapse::guard::{GuardEngine, GuardrailsConfig};
 
 fn guarded_embed_gateway(embed_toml: &str, guard_toml: &str) -> synapse::gateway::Gateway {
+    guarded_embed_gateway_with(embed_toml, guard_toml, Arc::new(StubEmbedder))
+}
+
+fn guarded_embed_gateway_with(
+    embed_toml: &str,
+    guard_toml: &str,
+    embedder: Arc<dyn EmbeddingProvider>,
+) -> synapse::gateway::Gateway {
     let routes = RouteTable::from_toml_str(
         r#"[routes."fast"]
            legs = [{ provider = "qwen", model = "qwen-max" }]"#,
@@ -129,7 +137,7 @@ fn guarded_embed_gateway(embed_toml: &str, guard_toml: &str) -> synapse::gateway
         .pricing(PricingTable::default())
         .ledger(LedgerHandle::spawn(store as Arc<dyn LedgerStore>, 64))
         .embed_routes(EmbeddingRouteTable::from_toml_str(embed_toml).unwrap())
-        .embedder("stub", Arc::new(StubEmbedder) as Arc<dyn EmbeddingProvider>)
+        .embedder("stub", embedder)
         .guard(
             GuardEngine::from_config(&GuardrailsConfig::from_toml_str(guard_toml).unwrap())
                 .unwrap(),
@@ -222,4 +230,52 @@ async fn embeddings_without_any_policy_are_not_scanned() {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
+}
+
+/// Records every input batch it is asked to embed.
+struct RecordingEmbedder(Arc<parking_lot::Mutex<Vec<String>>>);
+
+#[async_trait]
+impl EmbeddingProvider for RecordingEmbedder {
+    async fn embed(
+        &self,
+        _model: &str,
+        inputs: &[String],
+        dims: u32,
+    ) -> Result<EmbedOut, GatewayError> {
+        self.0.lock().extend(inputs.iter().cloned());
+        Ok(EmbedOut {
+            vectors: inputs.iter().map(|_| vec![0.0f32; dims as usize]).collect(),
+            input_tokens: 1,
+        })
+    }
+}
+
+#[tokio::test]
+async fn masked_embedding_input_is_redacted_for_the_embedder_and_signalled() {
+    const SECRET: &str = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";
+    let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let gw = guarded_embed_gateway_with(
+        EMBED,
+        r#"[guardrails.strict]
+           scanners = [{ type = "secrets", action = "mask" }]"#,
+        Arc::new(RecordingEmbedder(seen.clone())),
+    );
+    let resp = router(Arc::new(gw))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/embeddings")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"input": ["clean", format!("key {SECRET}")], "model": "guarded"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["x-synapse-guard"], "masked");
+    assert_eq!(*seen.lock(), vec!["clean", "key [REDACTED:secrets]"]);
 }

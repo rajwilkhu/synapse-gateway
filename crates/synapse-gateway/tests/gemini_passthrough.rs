@@ -538,6 +538,8 @@ async fn gemini_passthrough_counts_carry_the_vertex_provider_label() {
 const GUARD: &str = r#"
     [guardrails.strict]
     scanners = [{ type = "ban_substrings", substrings = ["forbidden"] }]
+    [guardrails.masking]
+    scanners = [{ type = "secrets", action = "mask" }]
     [guardrails.watch]
     mode = "observe"
     scanners = [{ type = "ban_substrings", substrings = ["forbidden"] }]
@@ -616,7 +618,7 @@ async fn alias_path_uses_the_alias_policy_and_sends_the_leg_model() {
     Mock::given(method("POST"))
         .and(path(GENERATE_PATH))
         .respond_with(ResponseTemplate::new(200).set_body_raw(OK_BODY, "application/json"))
-        .expect(2)
+        .expect(1)
         .mount(&mock)
         .await;
     let app = router(Arc::new(guarded_gateway(
@@ -657,8 +659,8 @@ async fn alias_path_uses_the_alias_policy_and_sends_the_leg_model() {
     .await;
     assert_eq!(s, StatusCode::OK, "alias forwards to the leg model path");
 
-    // By model id, the lex-first route `aaa` has no policy and there is no `default`.
-    let (s, _) = json_of(
+    // By model id, every route listing the model applies its policy, so `strict` blocks.
+    let (s, body) = json_of(
         app.oneshot(gemini_body(
             &format!("/v1beta/models/{MODEL}:generateContent"),
             user_says("this is forbidden"),
@@ -667,7 +669,8 @@ async fn alias_path_uses_the_alias_policy_and_sends_the_leg_model() {
         .unwrap(),
     )
     .await;
-    assert_eq!(s, StatusCode::OK);
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["details"][0]["metadata"]["policy"], "strict");
 }
 
 #[tokio::test]
@@ -822,6 +825,85 @@ async fn blocked_stream_request_makes_no_upstream_call() {
 }
 
 #[tokio::test]
+async fn blocked_embed_request_makes_no_upstream_call() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&mock)
+        .await;
+    let app = router(Arc::new(guarded_gateway(
+        &mock.uri(),
+        TWO_ROUTES,
+        PassthroughModels::Routed,
+        GatewayMetrics::noop(),
+    )));
+    let embed = serde_json::json!({"content": {"parts": [{"text": "forbidden"}]}});
+    let batch = serde_json::json!({"requests": [{"content": {"parts": [{"text": "forbidden"}]}}]});
+    for (action, body) in [("embedContent", embed), ("batchEmbedContents", batch)] {
+        let resp = app
+            .clone()
+            .oneshot(gemini_body(&format!("/v1beta/models/chat:{action}"), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{action}");
+    }
+}
+
+#[tokio::test]
+async fn single_forward_action_uses_matched_leg_region() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-flash:countTokens",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"totalTokens": 9})),
+        )
+        .expect(1)
+        .mount(&mock)
+        .await;
+    let routes = r#"[routes."regional"]
+        legs = [{ provider = "vertex", model = "gemini-2.5-flash", region = "us-central1" }]"#;
+    let app = router(Arc::new(guarded_gateway(
+        &mock.uri(),
+        routes,
+        PassthroughModels::Routed,
+        GatewayMetrics::noop(),
+    )));
+    let resp = app
+        .oneshot(gemini_body(
+            "/v1beta/models/gemini-2.5-flash:countTokens",
+            user_says("hello"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn blocked_unknown_action_body_makes_no_upstream_call() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&mock)
+        .await;
+    let app = router(Arc::new(guarded_gateway(
+        &mock.uri(),
+        TWO_ROUTES,
+        PassthroughModels::Routed,
+        GatewayMetrics::noop(),
+    )));
+    let body = serde_json::json!({"instances": [{"content": "this is forbidden"}]});
+    let resp = app
+        .oneshot(gemini_body("/v1beta/models/chat:predict", body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn malformed_json_gets_the_google_error_shape() {
     let mock = MockServer::start().await;
     let app = router(Arc::new(guarded_gateway(
@@ -909,8 +991,7 @@ async fn fallback_legs_do_not_rescan() {
         StatusCode::OK,
         "observe policy lets it through"
     );
-    let line =
-        r#"synapse_guard_scans_total{lane="passthrough",outcome="observe",policy="watch"} 1"#;
+    let line = r#"synapse_guard_scans_total{direction="input",lane="passthrough",outcome="observe",policy="watch"} 1"#;
     let text = scrape(&exporter);
     assert!(
         text.lines().any(|l| l == line),
@@ -981,4 +1062,63 @@ async fn encoded_path_traversal_in_the_action_is_rejected_in_routed_mode() {
         PassthroughModels::Routed,
     )
     .await;
+}
+
+#[tokio::test]
+async fn masked_tool_result_reaches_vertex_redacted_and_is_signalled() {
+    const SECRET: &str = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(GENERATE_PATH))
+        .and(body_string_contains("[REDACTED:secrets]"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(OK_BODY, "application/json"))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    let app = router(Arc::new(guarded_gateway(
+        &mock.uri(),
+        r#"[routes."mask"]
+           policy = "masking"
+           legs = [{ provider = "vertex", model = "gemini-2.5-flash" }]"#,
+        PassthroughModels::Routed,
+        GatewayMetrics::noop(),
+    )));
+    let body = serde_json::json!({"contents": [{"role": "user", "parts": [{"functionResponse": {"name": "f", "response": {"out": SECRET}}}]}]});
+    let resp = app
+        .oneshot(gemini_body("/v1beta/models/mask:generateContent", body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["x-synapse-guard"], "masked");
+    let seen = &mock.received_requests().await.unwrap()[0];
+    assert!(!String::from_utf8_lossy(&seen.body).contains(SECRET));
+}
+
+#[tokio::test]
+async fn masked_single_forward_action_reaches_vertex_redacted_and_is_signalled() {
+    const SECRET: &str = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("[REDACTED:secrets]"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(OK_BODY, "application/json"))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    let app = router(Arc::new(guarded_gateway(
+        &mock.uri(),
+        r#"[routes."mask"]
+           policy = "masking"
+           legs = [{ provider = "vertex", model = "gemini-2.5-flash" }]"#,
+        PassthroughModels::Routed,
+        GatewayMetrics::noop(),
+    )));
+    let body = serde_json::json!({"instances": [{"content": SECRET}]});
+    let resp = app
+        .oneshot(gemini_body("/v1beta/models/mask:predict", body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["x-synapse-guard"], "masked");
+    let seen = &mock.received_requests().await.unwrap()[0];
+    assert!(!String::from_utf8_lossy(&seen.body).contains(SECRET));
 }

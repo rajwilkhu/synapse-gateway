@@ -49,6 +49,7 @@ pub struct GatewayMetrics {
     guard_scans: Counter<u64>,
     guard_matches: Counter<u64>,
     guard_scan_duration: Histogram<f64>,
+    guard_classifier_score: Histogram<f64>,
     routing_decisions: Counter<u64>,
     routing_decision_duration: Histogram<f64>,
 }
@@ -90,6 +91,10 @@ impl GatewayMetrics {
             guard_scans: meter.u64_counter("synapse_guard_scans_total").build(),
             guard_matches: meter.u64_counter("synapse_guard_matches_total").build(),
             guard_scan_duration: seconds_histogram(meter, "synapse_guard_scan_duration_seconds"),
+            guard_classifier_score: meter
+                .f64_histogram("synapse_guard_classifier_score")
+                .with_boundaries(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+                .build(),
             routing_decisions: meter.u64_counter("synapse_routing_decisions_total").build(),
             routing_decision_duration: seconds_histogram(
                 meter,
@@ -195,12 +200,20 @@ impl GatewayMetrics {
             .record(f64::from(state), &[KeyValue::new("name", name)]);
     }
 
-    pub fn guard_scan(&self, policy: &str, lane: &'static str, outcome: &'static str, secs: f64) {
+    pub fn guard_scan(
+        &self,
+        policy: &str,
+        lane: &'static str,
+        direction: &'static str,
+        outcome: &'static str,
+        secs: f64,
+    ) {
         self.guard_scans.add(
             1,
             &[
                 KeyValue::new("policy", policy.to_string()),
                 KeyValue::new("lane", lane),
+                KeyValue::new("direction", direction),
                 KeyValue::new("outcome", outcome),
             ],
         );
@@ -209,6 +222,7 @@ impl GatewayMetrics {
             &[
                 KeyValue::new("policy", policy.to_string()),
                 KeyValue::new("lane", lane),
+                KeyValue::new("direction", direction),
             ],
         );
     }
@@ -217,6 +231,7 @@ impl GatewayMetrics {
         &self,
         policy: &str,
         lane: &'static str,
+        direction: &'static str,
         scanner: &str,
         severity: &'static str,
     ) {
@@ -225,8 +240,20 @@ impl GatewayMetrics {
             &[
                 KeyValue::new("policy", policy.to_string()),
                 KeyValue::new("lane", lane),
+                KeyValue::new("direction", direction),
                 KeyValue::new("scanner", scanner.to_string()),
                 KeyValue::new("severity", severity),
+            ],
+        );
+    }
+
+    /// One classifier score for one question of a policy.
+    pub fn guard_classifier_score(&self, policy: &str, question: &str, score: f64) {
+        self.guard_classifier_score.record(
+            score,
+            &[
+                KeyValue::new("policy", policy.to_string()),
+                KeyValue::new("question", question.to_string()),
             ],
         );
     }
@@ -400,8 +427,8 @@ mod tests {
         m.retry_attempt("qwen");
         m.resilience_call("qwen", "success", 0.3);
         m.breaker_transition("qwen", "open", 1);
-        m.guard_scan("strict", "chat", "block", 0.001);
-        m.guard_match("strict", "chat", "ban_substrings", "block");
+        m.guard_scan("strict", "chat", "input", "block", 0.001);
+        m.guard_match("strict", "chat", "input", "ban_substrings", "block");
         m.routing_decision("auto", "hard", "decided");
         m.routing_decision_duration("auto", 0.12);
     }
@@ -442,8 +469,8 @@ mod tests {
         m.retry_attempt("qwen");
         m.resilience_call("qwen", "success", 0.3);
         m.breaker_transition("qwen", "open", 1);
-        m.guard_scan("strict", "chat", "block", 0.001);
-        m.guard_match("strict", "chat", "ban_substrings", "block");
+        m.guard_scan("strict", "chat", "input", "block", 0.001);
+        m.guard_match("strict", "chat", "input", "ban_substrings", "block");
         m.routing_decision("auto", "hard", "decided");
         m.routing_decision_duration("auto", 0.12);
         let text = scrape(&exporter);
@@ -464,9 +491,9 @@ mod tests {
             r#"synapse_resilience_call_duration_seconds_count{label="qwen",outcome="success"} 1"#,
             r#"synapse_resilience_breaker_transitions_total{name="qwen",transition="open"} 1"#,
             r#"synapse_resilience_breaker_state{name="qwen"} 1"#,
-            r#"synapse_guard_scans_total{lane="chat",outcome="block",policy="strict"} 1"#,
-            r#"synapse_guard_matches_total{lane="chat",policy="strict",scanner="ban_substrings",severity="block"} 1"#,
-            r#"synapse_guard_scan_duration_seconds_count{lane="chat",policy="strict"} 1"#,
+            r#"synapse_guard_scans_total{direction="input",lane="chat",outcome="block",policy="strict"} 1"#,
+            r#"synapse_guard_matches_total{direction="input",lane="chat",policy="strict",scanner="ban_substrings",severity="block"} 1"#,
+            r#"synapse_guard_scan_duration_seconds_count{direction="input",lane="chat",policy="strict"} 1"#,
             r#"synapse_routing_decisions_total{outcome="decided",route="auto",tier="hard"} 1"#,
             r#"synapse_routing_decision_duration_seconds_count{route="auto"} 1"#,
         ] {
