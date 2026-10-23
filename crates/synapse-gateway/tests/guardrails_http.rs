@@ -100,6 +100,45 @@ async fn blocked_request_returns_400_content_policy_violation() {
     assert_eq!(json["error"]["scanners"][0], "ban_substrings");
 }
 
+#[tokio::test]
+async fn blocked_input_request_writes_blocked_guard_ledger_row() {
+    let store = Arc::new(InMemoryLedger::default());
+    let gateway = builder_with(
+        "http://127.0.0.1:1",
+        r#"[guardrails.strict]
+           scanners = [{ type = "ban_substrings", substrings = ["forbidden"] }]"#,
+    )
+    .ledger(LedgerHandle::spawn(
+        store.clone() as Arc<dyn LedgerStore>,
+        16,
+    ))
+    .build()
+    .unwrap();
+    let app = router(Arc::new(gateway));
+    let resp = app
+        .oneshot(chat_request("fast", "this is forbidden"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    for _ in 0..100 {
+        if !store.entries.lock().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let entries = store.entries.lock().clone();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    let row = &entries[0];
+    assert_eq!(row.lane, "guard");
+    assert_eq!(row.status, "blocked");
+    assert_eq!(row.op, "guard_input");
+    assert_eq!(row.provider, "synapse");
+    assert_eq!(row.model, "strict");
+    assert_eq!(row.route, "fast");
+    assert_eq!(row.input_tokens, 0);
+    assert_eq!(row.output_tokens, 0);
+}
+
 const SECRET: &str = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";
 
 /// The chat lane streams from the provider even for non-streaming requests.

@@ -201,8 +201,10 @@ impl Gateway {
         ctx: &RequestCtx,
         request_id: &str,
     ) -> Result<crate::guard::GuardDecision, GatewayError> {
-        let policy = self.routes.policy_of(&req.model).map(str::to_string);
+        let route = req.model.clone();
+        let policy = self.routes.policy_of(&route).map(str::to_string);
         self.guard_lane(
+            &route,
             policy.as_deref(),
             crate::guard::GuardLane::Chat,
             crate::guard::leaves::chat_leaves(req),
@@ -213,9 +215,11 @@ impl Gateway {
     }
 
     /// Screen a lane's text under `policy`, else `default`. A classifier answer
-    /// writes one `guard` ledger row, whether or not the request is blocked.
+    /// writes one `guard` ledger row, whether or not the request is blocked;
+    /// an input block without a classifier row writes a 0-token `guard` row.
     pub(crate) async fn guard_lane(
         &self,
+        route: &str,
         policy: Option<&str>,
         lane: crate::guard::GuardLane,
         segments: Vec<crate::guard::leaves::Segment<'_>>,
@@ -224,9 +228,19 @@ impl Gateway {
     ) -> Result<crate::guard::GuardDecision, GatewayError> {
         let policy = policy.unwrap_or("default");
         let screened = self.guard.screen(policy, lane, segments).await;
-        if let (Some(s), Some(route)) = (&screened.classifier, self.guard.classifier_route(policy))
+        let blocked = matches!(screened.outcome, Err(GatewayError::ContentBlocked { .. }));
+        if let (Some(s), Some(classifier_route)) =
+            (&screened.classifier, self.guard.classifier_route(policy))
         {
-            self.record_guard_classifier(ctx, route, request_id, s);
+            self.record_guard_classifier(
+                ctx,
+                classifier_route,
+                request_id,
+                s,
+                if blocked { "blocked" } else { "ok" },
+            );
+        } else if blocked {
+            self.record_guard_input_block(ctx, route, policy, request_id);
         }
         screened.outcome
     }
@@ -238,6 +252,7 @@ impl Gateway {
         classifier_route: &str,
         request_id: &str,
         s: &crate::guard::classifier::Scored,
+        status: &'static str,
     ) {
         let attr = self.attribution_of(ctx, classifier_route);
         self.ledger.enqueue(UsageEntry {
@@ -257,8 +272,40 @@ impl Gateway {
                 .pricing
                 .cost_usd("typesafe", &s.model, s.input_tokens, s.output_tokens),
             request_id: request_id.to_string(),
-            status: "ok".into(),
+            status: status.into(),
             op: "guard_classifier".into(),
+            user_task_type: attr.user_task_type,
+            ai_task_type: attr.ai_task_type,
+        });
+    }
+
+    /// One 0-token ledger row when an input guardrail blocks a request without
+    /// a classifier row.
+    fn record_guard_input_block(
+        &self,
+        ctx: &RequestCtx,
+        route: &str,
+        policy: &str,
+        request_id: &str,
+    ) {
+        let attr = self.attribution_of(ctx, route);
+        self.ledger.enqueue(UsageEntry {
+            ts: Utc::now(),
+            tenant: self.tenant_of(ctx).to_string(),
+            workspace: attr.workspace,
+            user: attr.user,
+            thread: attr.thread,
+            message: attr.message,
+            route: route.to_string(),
+            provider: "synapse".into(),
+            model: policy.to_string(),
+            lane: "guard".into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 0.0,
+            request_id: request_id.to_string(),
+            status: "blocked".into(),
+            op: "guard_input".into(),
             user_task_type: attr.user_task_type,
             ai_task_type: attr.ai_task_type,
         });
@@ -374,7 +421,7 @@ impl Gateway {
 
         let mut failures: Vec<LegFailure> = Vec::new();
         let mut last_retryable: Option<GatewayError> = None;
-        for leg in &vertex_legs {
+        for (i, leg) in vertex_legs.iter().enumerate() {
             match provider
                 .stream_generate(
                     &leg.model,
@@ -391,6 +438,20 @@ impl Gateway {
                     ));
                 }
                 Err(e) if native_start_retryable(&e) => {
+                    if let Some(next) = vertex_legs.get(i + 1) {
+                        let (kind, status) = gateway_error_summary(&e);
+                        tracing::warn!(
+                            target: "synapse::routing",
+                            route = %req.model,
+                            provider = %leg.provider,
+                            model = %leg.model,
+                            next_provider = %next.provider,
+                            next_model = %next.model,
+                            error.kind = kind,
+                            http.status = ?status,
+                            "leg failed; falling back to next leg"
+                        );
+                    }
                     failures.push(LegFailure {
                         provider: leg.provider.clone(),
                         model: leg.model.clone(),
@@ -450,8 +511,23 @@ impl Gateway {
             "questions": ext.questions.clone(),
         });
 
+        let fallback_after = |i: usize| -> Option<(&str, &str)> {
+            if let Some(next) = jev_legs.get(i + 1) {
+                let next_model = if next.model.is_empty() {
+                    crate::jev_native::DEFAULT_MODEL
+                } else {
+                    next.model.as_str()
+                };
+                Some((next.provider.as_str(), next_model))
+            } else {
+                legs.iter()
+                    .find(|l| l.provider != "typesafe")
+                    .map(|next| (next.provider.as_str(), next.model.as_str()))
+            }
+        };
+
         let mut failures: Vec<LegFailure> = Vec::new();
-        for leg in jev_legs {
+        for (i, leg) in jev_legs.iter().enumerate() {
             let model = if leg.model.is_empty() {
                 crate::jev_native::DEFAULT_MODEL.to_string()
             } else {
@@ -462,6 +538,20 @@ impl Gateway {
             let resp = match provider.evaluate(body.clone()).await {
                 Ok(r) => r,
                 Err(e) if native_start_retryable(&e) => {
+                    if let Some((next_provider, next_model)) = fallback_after(i) {
+                        let (kind, status) = gateway_error_summary(&e);
+                        tracing::warn!(
+                            target: "synapse::routing",
+                            route = %req.model,
+                            provider = %leg.provider,
+                            model = %model,
+                            next_provider,
+                            next_model,
+                            error.kind = kind,
+                            http.status = ?status,
+                            "leg failed; falling back to next leg"
+                        );
+                    }
                     failures.push(LegFailure {
                         provider: leg.provider.clone(),
                         model,
@@ -503,6 +593,19 @@ impl Gateway {
                 || status == reqwest::StatusCode::TOO_MANY_REQUESTS
                 || status == reqwest::StatusCode::REQUEST_TIMEOUT
             {
+                if let Some((next_provider, next_model)) = fallback_after(i) {
+                    tracing::warn!(
+                        target: "synapse::routing",
+                        route = %req.model,
+                        provider = %leg.provider,
+                        model = %model,
+                        next_provider,
+                        next_model,
+                        error.kind = "http_status",
+                        http.status = status.as_u16(),
+                        "leg failed; falling back to next leg"
+                    );
+                }
                 failures.push(LegFailure {
                     provider: leg.provider.clone(),
                     model,
@@ -757,10 +860,11 @@ impl Gateway {
         if lane_str != "jev" && self.guard.has_output(&policy) {
             let scan_started = Instant::now();
             let scan = self.guard.screen_output(&policy, &mut completion.content);
-            self.guard.record_output_scan(
+            self.guard.record_output_scan_with_scanners(
                 &policy,
                 scan.outcome,
                 scan_started.elapsed().as_secs_f64(),
+                &scan.matched,
             );
             if !scan.blockers.is_empty() {
                 completion.content.clear();
@@ -837,6 +941,7 @@ impl Gateway {
         };
         let decision = self
             .guard_lane(
+                &alias,
                 self.embed_routes.policy_of(&alias),
                 crate::guard::GuardLane::Embeddings,
                 crate::guard::leaves::embedding_leaves(&mut inputs),
@@ -851,7 +956,7 @@ impl Gateway {
             .to_vec();
 
         let mut last_err: Option<GatewayError> = None;
-        for leg in &legs {
+        for (i, leg) in legs.iter().enumerate() {
             let Some(embedder) = self.embedders.get(&leg.provider) else {
                 continue;
             };
@@ -874,7 +979,23 @@ impl Gateway {
                     self.record_embed_usage(&ctx, &alias, leg, out.input_tokens);
                     return Ok((crate::embeddings::build_response(alias, out), decision));
                 }
-                Err(e) => last_err = Some(e),
+                Err(e) => {
+                    if let Some(next) = legs.get(i + 1) {
+                        let (kind, status) = gateway_error_summary(&e);
+                        tracing::warn!(
+                            target: "synapse::routing",
+                            route = %alias,
+                            provider = %leg.provider,
+                            model = %leg.model,
+                            next_provider = %next.provider,
+                            next_model = %next.model,
+                            error.kind = kind,
+                            http.status = ?status,
+                            "leg failed; falling back to next leg"
+                        );
+                    }
+                    last_err = Some(e);
+                }
             }
         }
         Err(last_err.unwrap_or(GatewayError::AllLegsFailed {
@@ -937,6 +1058,15 @@ impl Gateway {
             user_task_type: attr.user_task_type,
             ai_task_type: attr.ai_task_type,
         });
+    }
+}
+
+pub(crate) fn gateway_error_summary(e: &GatewayError) -> (&'static str, Option<u16>) {
+    match e {
+        GatewayError::Upstream { status, .. } => ("http_status", Some(*status)),
+        GatewayError::UpstreamTimeout => ("timeout", None),
+        GatewayError::AllCircuitsOpen(_) => ("circuit_open", None),
+        _ => ("upstream_error", None),
     }
 }
 

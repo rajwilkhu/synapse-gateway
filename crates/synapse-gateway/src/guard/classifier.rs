@@ -188,7 +188,7 @@ fn fit_state(text: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::guard::policy::GuardrailsConfig;
     use serde_json::json;
@@ -314,7 +314,7 @@ mod tests {
     /// Installs, once per test binary, a global subscriber writing to `LOGS`.
     /// A thread-scoped default is not enough: a callsite's interest is cached
     /// process-wide by whichever thread hits it first.
-    fn capture_logs() {
+    pub(crate) fn capture_logs() {
         static INIT: std::sync::Once = std::sync::Once::new();
         INIT.call_once(|| {
             tracing::subscriber::set_global_default(
@@ -328,6 +328,10 @@ mod tests {
         LOGS.with(|l| l.borrow_mut().clear());
     }
 
+    pub(crate) fn take_logs() -> String {
+        LOGS.with(|l| String::from_utf8(l.borrow().clone()).unwrap())
+    }
+
     /// The formatted events `score("tenant text")` emits on this thread against
     /// a Jev answering `resp`.
     async fn score_logs(resp: ResponseTemplate) -> String {
@@ -338,7 +342,7 @@ mod tests {
             .await;
         capture_logs();
         assert!(classifier(&jev.uri()).score("tenant text").await.is_none());
-        LOGS.with(|l| String::from_utf8(l.borrow().clone()).unwrap())
+        take_logs()
     }
 
     #[tokio::test]

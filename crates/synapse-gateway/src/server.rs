@@ -311,10 +311,11 @@ async fn forward_gemini(
     };
 
     let (ctx, request_id) = stamped_ctx(&headers);
+    let route_name = chain.route.as_deref().unwrap_or(model);
     let decision = if NON_CONTENT_ACTIONS.contains(&action) {
         crate::guard::GuardDecision::default()
     } else {
-        screen_gemini(&st, model, action, &mut body, &ctx, &request_id).await?
+        screen_gemini(&st, model, route_name, action, &mut body, &ctx, &request_id).await?
     };
 
     // Non-generation actions: pure single forward, no chain / metering.
@@ -351,6 +352,7 @@ async fn forward_gemini(
 async fn screen_gemini(
     st: &AppState,
     model: &str,
+    route: &str,
     action: &str,
     body: &mut serde_json::Value,
     ctx: &RequestCtx,
@@ -366,6 +368,7 @@ async fn screen_gemini(
         let d = st
             .gateway
             .guard_lane(
+                route,
                 Some(policy),
                 crate::guard::GuardLane::Passthrough,
                 leaves,
@@ -419,6 +422,18 @@ async fn forward_gemini_legs(
                     .metrics
                     .passthrough("vertex", &leg.model, action, false);
                 if i + 1 < chain.legs.len() {
+                    let next = &chain.legs[i + 1];
+                    tracing::warn!(
+                        target: "synapse::routing",
+                        lane = "passthrough",
+                        route = route_alias.unwrap_or(&leg.model),
+                        from_provider = "vertex",
+                        from_model = %leg.model,
+                        to_provider = "vertex",
+                        to_model = %next.model,
+                        reason = "error",
+                        "leg failed; falling back to next leg"
+                    );
                     prev_model = Some(leg.model.clone());
                     continue;
                 }
@@ -478,6 +493,18 @@ async fn forward_gemini_legs(
         meter_passthrough_error(&st.gateway, ctx, &leg.model, route_alias);
 
         if passthrough_status_retryable(status) && i + 1 < chain.legs.len() {
+            let next = &chain.legs[i + 1];
+            tracing::warn!(
+                target: "synapse::routing",
+                lane = "passthrough",
+                route = route_alias.unwrap_or(&leg.model),
+                from_provider = "vertex",
+                from_model = %leg.model,
+                to_provider = "vertex",
+                to_model = %next.model,
+                status = status.as_u16(),
+                "leg failed; falling back to next leg"
+            );
             prev_model = Some(leg.model.clone());
             last_failure = Some((status.as_u16(), bytes));
             continue;
@@ -533,6 +560,7 @@ async fn jev_passthrough(
     let decision = st
         .gateway
         .guard_lane(
+            &model,
             None,
             crate::guard::GuardLane::Jev,
             crate::guard::leaves::jev_leaves(&mut body),

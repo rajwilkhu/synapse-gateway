@@ -109,6 +109,7 @@ pub struct Screened {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct OutputScan {
     pub blockers: Vec<String>,
+    pub matched: Vec<String>,
     pub outcome: &'static str,
 }
 
@@ -117,6 +118,7 @@ struct SegmentVerdict {
     wanted: Vec<Action>,
     effects: Vec<Effect>,
     blockers: Vec<String>,
+    matched: Vec<String>,
     masked: bool,
     /// Each input segment's joined text with every mask span applied, in
     /// both modes. Empty for output.
@@ -293,6 +295,8 @@ impl GuardEngine {
             outcome,
             started.elapsed().as_secs_f64(),
         );
+        let scanners = sorted_dedup(std::mem::take(&mut verdict.matched));
+        log_guard_outcome(policy_name, lane.label(), "input", outcome, &scanners);
         Screened {
             classifier: scored,
             outcome: verdict.into_decision(policy_name),
@@ -323,6 +327,7 @@ impl GuardEngine {
                 Severity::Block,
                 mode,
             );
+            verdict.matched.push(name.clone());
             if eff == Effect::Block {
                 verdict.blockers.push(name);
             }
@@ -398,13 +403,25 @@ impl GuardEngine {
         let scan = OutputScan {
             outcome: outcome_label(&v.wanted, &v.effects),
             blockers: v.blockers,
+            matched: sorted_dedup(v.matched),
         };
         (scan, released)
     }
 
     pub fn record_output_scan(&self, policy: &str, outcome: &'static str, secs: f64) {
+        self.record_output_scan_with_scanners(policy, outcome, secs, &[]);
+    }
+
+    pub fn record_output_scan_with_scanners(
+        &self,
+        policy: &str,
+        outcome: &'static str,
+        secs: f64,
+        scanners: &[String],
+    ) {
         self.metrics
             .guard_scan(policy, GuardLane::Chat.label(), "output", outcome, secs);
+        log_guard_outcome(policy, GuardLane::Chat.label(), "output", outcome, scanners);
     }
 
     /// Scan one segment's joined text. Blocking matches anywhere are recorded
@@ -442,6 +459,7 @@ impl GuardEngine {
                 m.scanner,
                 severity_label(m.severity),
             );
+            verdict.matched.push(m.scanner.to_string());
             if eff == Effect::Block {
                 verdict.blockers.push(m.scanner.to_string());
             }
@@ -491,6 +509,7 @@ impl SegmentVerdict {
         self.wanted.extend(other.wanted);
         self.effects.extend(other.effects);
         self.blockers.extend(other.blockers);
+        self.matched.extend(other.matched);
         self.masked |= other.masked;
         self.classified.extend(other.classified);
         self
@@ -508,6 +527,44 @@ impl SegmentVerdict {
             policy: policy.to_string(),
             scanners: self.blockers,
         })
+    }
+}
+
+fn sorted_dedup(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Emits a structured tracing log for non-pass guardrail scan outcomes. Never
+/// logs prompt or output text.
+fn log_guard_outcome(
+    policy: &str,
+    lane: &'static str,
+    direction: &'static str,
+    outcome: &'static str,
+    scanners: &[String],
+) {
+    match outcome {
+        "block" | "observe" => tracing::warn!(
+            target: "synapse::guard",
+            policy,
+            lane,
+            direction,
+            outcome,
+            ?scanners,
+            "guardrail match"
+        ),
+        "masked" | "flag" => tracing::info!(
+            target: "synapse::guard",
+            policy,
+            lane,
+            direction,
+            outcome,
+            ?scanners,
+            "guardrail match"
+        ),
+        _ => {}
     }
 }
 
@@ -794,5 +851,82 @@ mod tests {
     #[test]
     fn write_lane_label_is_write() {
         assert_eq!(GuardLane::Write.label(), "write");
+    }
+
+    #[tokio::test]
+    async fn non_pass_outcomes_emit_tracing_logs_without_prompt_text() {
+        crate::guard::classifier::tests::capture_logs();
+        let e = engine(
+            r#"[guardrails.block_p]
+            scanners = [{ type = "ban_substrings", substrings = ["forbidden"] }]
+
+            [guardrails.observe_p]
+            mode = "observe"
+            scanners = [{ type = "ban_substrings", substrings = ["forbidden"] }]
+
+            [guardrails.mask_p]
+            scanners = [{ type = "secrets", action = "mask" }]
+
+            [guardrails.flag_p]
+            scanners = [{ type = "ban_substrings", substrings = ["watchword"], action = "log" }]
+
+            [guardrails.output_p]
+            scanners = []
+            output_scanners = [{ type = "ban_substrings", substrings = ["secret_output"] }]"#,
+        );
+
+        let _ = crate::guard::classifier::tests::take_logs();
+
+        // 1. Pass outcome produces no guard log.
+        assert!(screen_chat(&e, "block_p", &mut chat("completely benign"))
+            .await
+            .is_ok());
+        assert!(
+            crate::guard::classifier::tests::take_logs()
+                .lines()
+                .all(|l| !l.contains("synapse::guard")),
+            "pass outcome must not emit a synapse::guard log"
+        );
+
+        // 2. Block, observe, mask, and flag on input emit logs without prompt text.
+        assert!(screen_chat(&e, "block_p", &mut chat("this is forbidden"))
+            .await
+            .is_err());
+        assert!(screen_chat(&e, "observe_p", &mut chat("this is forbidden"))
+            .await
+            .is_ok());
+        assert!(
+            screen_chat(&e, "mask_p", &mut chat(&format!("token {SECRET}")))
+                .await
+                .is_ok()
+        );
+        assert!(screen_chat(&e, "flag_p", &mut chat("contains watchword"))
+            .await
+            .is_ok());
+
+        // 3. Output scan records non-pass outcome with matched scanners.
+        let mut out_text = "has secret_output inside".to_string();
+        let scan = e.screen_output("output_p", &mut out_text);
+        e.record_output_scan_with_scanners("output_p", scan.outcome, 0.001, &scan.matched);
+
+        let logs = crate::guard::classifier::tests::take_logs();
+        for expected in [
+            r#"policy="block_p" lane="chat" direction="input" outcome="block" scanners=["ban_substrings"]"#,
+            r#"policy="observe_p" lane="chat" direction="input" outcome="observe" scanners=["ban_substrings"]"#,
+            r#"policy="mask_p" lane="chat" direction="input" outcome="masked" scanners=["secrets"]"#,
+            r#"policy="flag_p" lane="chat" direction="input" outcome="flag" scanners=["ban_substrings"]"#,
+            r#"policy="output_p" lane="chat" direction="output" outcome="block" scanners=["ban_substrings"]"#,
+        ] {
+            assert!(
+                logs.contains(expected),
+                "expected `{expected}` in logs:\n{logs}"
+            );
+        }
+        for sensitive in ["this is forbidden", SECRET, "watchword", "secret_output"] {
+            assert!(
+                !logs.contains(sensitive),
+                "guard logs must never contain prompt/output text `{sensitive}`:\n{logs}"
+            );
+        }
     }
 }
