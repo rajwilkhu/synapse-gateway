@@ -18,25 +18,30 @@ client
 route lookup ─────────────► 404 model_not_found (unknown alias)
   │
   ▼
-guardrails (route policy) ─► 400 content_blocked
-  │
+input guardrails (route policy; enforced in `block` mode or dry-run in `observe` mode)
+  ├─► 1. in-process span scanners (`llm-guard`: block, `[REDACTED:...]` mask, or log)
+  └─► 2. Jev semantic classifier (optional `noul` questions on post-mask input)
+  │                        └─► 400 content_blocked (or 503 guard_unavailable)
   ▼
 route planning             static route: its legs
-  │                        strategy = "jev": the Jev router picks a tier
+  │                        strategy = "jev": the Jev router scores difficulty + reasoning
   ▼
 lane detection
-  ├─► standard lane        (genai: OpenAI, Qwen, oai_compat, Vertex)
+  ├─► standard lane        (genai: OpenAI, Qwen, oai_compat, Vertex; per-leg retries & breaker)
   ├─► native Vertex lane   (Vertex REST: :streamGenerateContent)
-  └─► Jev lane             (TypeSafe System One)
+  └─► Jev lane             (TypeSafe System One questions or `jev.extract` hybrid extraction)
   │
   ▼
 fallback chain             leg 1 → leg 2 → … until one succeeds
   │
   ▼
-provider ──► response to the client (JSON or server-sent events)
+output guardrails          optional `output_scanners` (buffered or streaming holdback window)
   │
-  ├─► cost ledger          tokens and cost per tenant, written asynchronously
-  └─► metrics              OpenTelemetry synapse_* metrics (Prometheus, OTLP)
+  ▼
+response to the client (JSON or server-sent events)
+  │
+  ├─► cost ledger          tokens and cost per tenant (`standard`/`native`/`jev`/`guard`)
+  └─► metrics & logs       OpenTelemetry `synapse_*` metrics + `synapse::*` tracing events
 ```
 
 Each route alias in `routes.toml` maps to an ordered list of legs (provider plus model).

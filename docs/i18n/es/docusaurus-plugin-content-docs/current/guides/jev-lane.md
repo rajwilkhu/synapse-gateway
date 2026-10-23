@@ -197,6 +197,22 @@ política `default`, y ningún ajuste asigna otra política a este endpoint.
 
 ## Carril Jev y router Jev {#jev-lane-and-jev-router}
 
-El carril Jev responde a tus preguntas. El [router Jev](jev-router.md) es una funcionalidad
-distinta que usa Jev para elegir un nivel de modelo para peticiones de chat ordinarias. Un
-bloque `jev` enviado a una ruta `strategy = "jev"` devuelve `400`.
+Synapse utiliza TypeSafe System One (Jev) de cinco formas distintas en el gateway:
+
+1. **Clasificador semántico de guardrails (`[guardrails.<name>.classifier]`)**: Evalúa preguntas
+   `noul` de la política sobre la entrada ya enmascarada en todos los carriles antes de cualquier
+   decisión de enrutamiento o llamada a un proveedor. Consulta
+   [Dónde y cómo se usa Jev](../configuration/guardrails-policy.md#where-and-how-jev-is-used) y
+   [Clasificador](../configuration/guardrails-policy.md#classifier).
+2. **Router Jev (`strategy = "jev"`)**: Evalúa `difficulty` (`score`) y `needs_reasoning` (`noul`)
+   en peticiones de chat ordinarias para elegir un nivel de modelo y un esfuerzo de razonamiento.
+   Consulta [Router Jev](jev-router.md). Un bloque `jev` enviado a una ruta `strategy = "jev"`
+   devuelve `400`.
+3. **Carril Jev (`jev.questions`)**: Evalúa preguntas `choice`, `score` o `noul` enviadas por el
+   cliente en los tramos `typesafe` de una ruta y devuelve el mapa `answers` como un
+   `chat.completion`.
+4. **Extracción híbrida (`jev.extract`)**: Usa preguntas `noul` de Jev para filtrar candidatos
+   (`noul >= floor`) y extrae JSON estructurado solo de los candidatos que superan el corte usando
+   los tramos de chat de la ruta.
+5. **Passthrough de Jev (`POST /typesafe/v1/systemone`)**: Reenvía un cuerpo nativo `{state,
+   questions}` tal cual a TypeSafe tras escanearlo bajo la política de guardrails `default`.

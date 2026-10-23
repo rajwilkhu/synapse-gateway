@@ -38,12 +38,12 @@ without an error:
 
 ## Resilience
 
-- **No retries and no circuit breakers.** Each leg gets one attempt per request, and a leg that
-  is down is tried, and fails, on every request. The only protection is the next leg in the
-  chain. See [Fallback chains](../guides/fallback-chains.md#the-order-of-legs).
-- **Embeddings** have the same simple fallback, with no retries of their own.
-- The `synapse_resilience_*` metrics exist but are never recorded, and the matching panels of
-  the [Grafana dashboard](../operating/grafana-dashboard.md) stay empty.
+- **Retries and circuit breakers are standard-lane only.** Each `(provider, model)` leg on the
+  standard lane has its own retry policy and circuit breaker, and records
+  `synapse_resilience_*` metrics and `synapse::resilience` logs. On the native Vertex, Jev and
+  embedding lanes, each leg gets one attempt per request with no circuit breaker, and the next
+  leg in the chain provides failover. See
+  [Fallback chains](../guides/fallback-chains.md#the-order-of-legs).
 
 ## Timeouts
 

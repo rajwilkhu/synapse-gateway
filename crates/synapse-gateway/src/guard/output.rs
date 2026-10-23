@@ -19,6 +19,7 @@ pub struct OutputGuard {
     holdback: usize,
     held: String,
     worst: &'static str,
+    matched: Vec<String>,
     scan_secs: f64,
     recorded: bool,
 }
@@ -31,6 +32,7 @@ impl OutputGuard {
             policy,
             held: String::new(),
             worst: "pass",
+            matched: Vec::new(),
             scan_secs: 0.0,
             recorded: false,
         }
@@ -73,6 +75,7 @@ impl OutputGuard {
             .release_output(&self.policy, &mut self.held, window_cut);
         self.scan_secs += started.elapsed().as_secs_f64();
         self.worst = worse(self.worst, scan.outcome);
+        self.matched.extend(scan.matched);
         if scan.blockers.is_empty() {
             return Release::Text(released);
         }
@@ -84,8 +87,14 @@ impl OutputGuard {
     fn record(&mut self) {
         if !self.recorded {
             self.recorded = true;
-            self.engine
-                .record_output_scan(&self.policy, self.worst, self.scan_secs);
+            self.matched.sort();
+            self.matched.dedup();
+            self.engine.record_output_scan_with_scanners(
+                &self.policy,
+                self.worst,
+                self.scan_secs,
+                &self.matched,
+            );
         }
     }
 }
@@ -390,5 +399,28 @@ mod tests {
             .filter(|l| l.starts_with("synapse_guard_matches_total"))
             .collect();
         assert!(n.len() == 1 && n[0].ends_with(" 1"), "{text}");
+    }
+
+    #[test]
+    fn output_guard_logs_non_pass_outcome_with_scanners() {
+        crate::guard::classifier::tests::capture_logs();
+        let _ = crate::guard::classifier::tests::take_logs();
+
+        {
+            let mut g = guard(48);
+            let _ = stream(&mut g, &format!("key: {SECRET} end"), 5);
+        }
+
+        let logs = crate::guard::classifier::tests::take_logs();
+        let expected =
+            r#"policy="p" lane="chat" direction="output" outcome="masked" scanners=["secrets"]"#;
+        assert!(
+            logs.contains(expected),
+            "expected `{expected}` in logs:\n{logs}"
+        );
+        assert!(
+            !logs.contains(SECRET),
+            "output guard log must never contain secret text:\n{logs}"
+        );
     }
 }

@@ -110,8 +110,11 @@ Named guardrail policies. See [Guardrails policy](../configuration/guardrails-po
 
 | Key | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `scanners` | array | Yes | — | Scanner names, or scanner tables. |
-| `mode` | string | No | `"block"` | `"block"` or `"observe"`. |
+| `scanners` | array | Yes | — | Input scanner names, or scanner tables. Use `[]` for no input span scanning. |
+| `mode` | string | No | `"block"` | `"block"` (enforce blocks and masks) or `"observe"` (dry-run). |
+| `classifier` | table | No | — | TypeSafe Jev `noul` classifier table. See [Classifier](#guardrailsnameclassifier). |
+| `output_scanners` | array | No | `[]` | Output scanner names or tables applied to assistant replies on chat completions. |
+| `output_holdback_chars` | integer | No | `256` | Characters held back while scanning streamed chat replies (minimum `1`). |
 
 ### Scanner table
 
@@ -119,13 +122,25 @@ A scanner is a bare name, such as `"secrets"`, or a table:
 
 | Key | Type | Used by | Description |
 |---|---|---|---|
-| `type` | string | every scanner | Required. The scanner name: `prompt_injection`, `secrets`, `pii`, `invisible_text`, `role_override`, `token_limit`, `ban_substrings` or `script_mix`. |
+| `type` | string | every scanner | Required. The scanner name: `prompt_injection`, `role_override`, `secrets`, `pii`, `invisible_text`, `token_limit`, `ban_substrings`, `isolation_bypass`, `data_exfil` or `script_mix`. |
+| `action` | string | every scanner | Optional. `"block"`, `"mask"` (valid on `secrets`, `pii`, `ban_substrings`) or `"log"`. Overrides the scanner's default severity. |
 | `max_chars` | integer | `token_limit` | Required for `token_limit`. Maximum input length in characters. |
 | `substrings` | array of strings | `ban_substrings` | Required for `ban_substrings`, non-empty. |
 | `severity` | string | `ban_substrings` | `block` (default), `warn` or `info`. |
 | `threshold` | integer | `script_mix` | Characters outside the dominant script before flagging. Default `2`. |
 
-See [Scanners](../configuration/guardrails-policy.md#scanners).
+### `[guardrails.<name>.classifier]`
+
+| Key | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `route` | string | Yes | — | Route alias in `routes.toml` whose `typesafe` legs evaluate the classifier questions. |
+| `on_error` | string | No | `"allow"` | `"allow"` or `"block"` when every `typesafe` leg fails or returns a malformed response. |
+| `questions.<q>.instructions` | string | Yes | — | Natural-language `noul` question evaluated by TypeSafe Jev against the post-mask input. |
+| `questions.<q>.threshold` | float | Yes | — | Score threshold in `(0.0, 1.0]`. Scores `>= threshold` count as a match. |
+| `questions.<q>.action` | string | No | `"block"` | `"block"` or `"log"`. (`"mask"` is not supported on classifier questions.) |
+
+See [Scanners](../configuration/guardrails-policy.md#scanners) and
+[Classifier](../configuration/guardrails-policy.md#classifier).
 
 ## `ai_task_types.toml`
 

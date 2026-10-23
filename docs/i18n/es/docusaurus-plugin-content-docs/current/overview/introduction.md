@@ -42,11 +42,14 @@ esas peticiones por un carril Vertex nativo dedicado, mientras que el resto de p
 va por el carril estándar compatible con OpenAI. Obtienes enrutamiento multiproveedor y las
 funcionalidades nativas de Vertex, sin tener que elegir entre uno y otro.
 
-Además, permite que un modelo tome decisiones de enrutamiento: el router Jev pregunta a Jev
-lo exigente que es cada petición y elige para ella un nivel de modelo y un esfuerzo de
-razonamiento. Y como Synapse es un código Rust pequeño y no un framework, el código de
-enrutamiento, fallback, registro de costes y observabilidad es tuyo para leerlo, ejecutarlo
-y embeberlo.
+Además, utiliza TypeSafe System One (**Jev**) a lo largo de todo el ciclo de vida de la
+petición: una política de guardrails puede pedir a Jev que clasifique semánticamente las
+entradas antes de cualquier decisión de enrutamiento o llamada a un proveedor, el router Jev
+pregunta a Jev lo exigente que es cada petición para elegir un nivel de modelo y un esfuerzo
+de razonamiento, y el carril Jev responde preguntas tipadas o filtra candidatos en
+extracciones híbridas. Y como Synapse es un código Rust pequeño y no un framework, el código
+de enrutamiento, fallback, guardrails, registro de costes y observabilidad es tuyo para
+leerlo, ejecutarlo y embeberlo.
 
 ## Cuándo usar Synapse {#when-to-use-synapse}
 
@@ -116,6 +119,8 @@ Compatibilidad y operación:
   y, opcionalmente, enviadas por OTLP. Consulta [Métricas](../operating/metrics.md), el
   [catálogo de métricas](../reference/metrics-catalogue.md) y el
   [panel de Grafana](../operating/grafana-dashboard.md).
-- **Guardrails de entrada**: políticas de escáneres con nombre (inyección de prompts,
-  secretos, PII y más) que bloquean u observan las peticiones antes de que lleguen a un
-  proveedor. Consulta [Política de guardrails](../configuration/guardrails-policy.md).
+- **Guardrails de entrada y salida**: políticas con nombre que combinan escáneres
+  deterministas en proceso (inyección de prompts, secretos, PII, evasión de aislamiento entre
+  tenants, exfiltración de datos y más), enmascaramiento `[REDACTED:...]` in situ,
+  clasificación semántica opcional con Jev, escaneo de salida con retención en streaming y
+  modo `observe` (dry-run). Consulta [Política de guardrails](../configuration/guardrails-policy.md).

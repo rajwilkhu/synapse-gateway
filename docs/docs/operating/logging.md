@@ -34,8 +34,9 @@ The default is `info`. An invalid value also means `info`.
 | Target | What logs under it |
 |---|---|
 | `synapse_gateway` | The binary: startup and listener messages. |
-| `synapse` | The gateway library, such as `synapse::ledger::connect` and `synapse::routing::table`. |
-| `synapse::routing` | Jev router decisions. |
+| `synapse` | The gateway library, such as `synapse::ledger::connect`, `synapse::resilience` and `synapse::routing::table`. |
+| `synapse::guard` | Guardrail non-pass outcomes (`block`, `observe`, `masked`, `flag`) and Jev classifier failures. |
+| `synapse::routing` | Jev router decisions and route leg fallbacks. |
 | `synapse_a2a` | The A2A registry seed. |
 | Others | Dependencies, such as `sqlx`. |
 
@@ -46,6 +47,7 @@ RUST_LOG=info                     # the default
 RUST_LOG=warn,synapse=info        # only warnings from dependencies
 RUST_LOG=info,sqlx=warn           # hide Postgres notices at startup
 RUST_LOG=info,synapse::routing=warn   # drop the per-request "route planned" events
+RUST_LOG=info,synapse::guard=warn     # only log guardrail block and observe (dry-run) events
 ```
 
 With the Postgres ledger, `sqlx` logs an `info` notice for each column the gateway checks
@@ -80,9 +82,15 @@ standard error and exits with a non-zero status.
 
 | Level | Target | Message | Meaning |
 |---|---|---|---|
+| `WARN` | `synapse::guard` | `guardrail match` | A guardrail scan produced `outcome = "block"` or `outcome = "observe"` (dry-run would-block). Fields: `policy`, `lane`, `direction`, `outcome`, `scanners`. See [Guardrails policy](../configuration/guardrails-policy.md#logs-and-ledger-rows). |
+| `INFO` | `synapse::guard` | `guardrail match` | A guardrail scan produced `outcome = "masked"` or `outcome = "flag"` (`action = "log"` / `warn` severity). |
+| `WARN` | `synapse::guard` | `jev guard classifier failed after trying all typesafe legs` | A policy's Jev classifier gave no valid answer; `route`, `model`, `error.kind` and `http.status` say how. |
 | `INFO` | `synapse::routing` | `route planned` | One per request on a `jev` route, with the mode, decided tier, outcome, effort and Jev's scores. See [Jev router](../guides/jev-router.md#metrics-and-logs). |
 | `WARN` | `synapse::routing` | `jev decision timed out; routing to default_tier` | Jev did not answer within `timeout_ms`. |
 | `WARN` | `synapse::routing` | `jev decision failed; routing to default_tier` | Jev failed; `error.kind` and `http.status` say how. The response body is never logged. |
+| `WARN` | `synapse::routing` | `leg failed; falling back to next leg` | A route leg failed and the chain advanced to the next leg, with `route`, failing `provider`/`model`, next `provider`/`model`, and error classification. See [Fallback chains](../guides/fallback-chains.md). |
+| `WARN` | `synapse::resilience` | `retrying outbound call` | A transient provider error (`5xx`, `429`, `408`, timeout/connect) is being retried on the same leg with exponential backoff (`label`, `attempt`, `next_delay_ms`, `error`). |
+| `WARN` / `INFO` | `synapse::resilience` | `circuit breaker opened`, `circuit breaker half-open`, `circuit breaker closed` | A provider's circuit breaker changed state (`name`, `consecutive_failures`). |
 | `WARN` | `synapse::ledger` | `ledger write failed` | The only ledger sink rejected a row, which is lost. |
 | `WARN` | `synapse::ledger` | `ledger sink write failed` | One of several sinks rejected a row; `backend` names it. The other sinks still got the row. |
 | `WARN` | `synapse::ledger` | `ledger background writer stopped` | The ledger writer exited; no further rows are recorded. |
@@ -95,11 +103,7 @@ Ledger failure lines carry the row's `tenant`, and `ledger write failed` also it
 
 - **Requests.** There is no access log. Use the access logs of the proxy or load balancer in
   front of the gateway.
-- **Provider errors.** A failed leg is not logged. Its error is returned to the client, in
-  the `failures` array of an `all_legs_failed` error or in the error message, and the metrics
-  show which model served each request. See
-  [Fallback chains](../guides/fallback-chains.md#when-every-leg-fails).
-- **Content.** Prompts, messages and model output are never logged.
+- **Content.** Prompts, messages, upstream error bodies and model output are never logged.
 
 ## Tracing
 

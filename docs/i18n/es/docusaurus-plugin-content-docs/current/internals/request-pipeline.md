@@ -75,10 +75,18 @@ convierte la petición en un `RoutePlan`, una lista ordenada de tramos, en `plan
    `default` y llama a
    [`guard/engine.rs`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/src/guard/engine.rs).
    Las políticas vienen de
-   [`guard/policy.rs`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/src/guard/policy.rs)
-   y los escáneres de
-   [`guard/scanners.rs`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/src/guard/scanners.rs).
-   Un bloqueo falla con `400 content_blocked`, antes de cualquier llamada a un proveedor o a Jev.
+   [`guard/policy.rs`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/src/guard/policy.rs),
+   los escáneres de
+   [`guard/scanners.rs`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/src/guard/scanners.rs),
+   el enmascaramiento `[REDACTED:<scanner>]` in situ de
+   [`guard/mask.rs`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/src/guard/mask.rs),
+   y la clasificación semántica `noul` con Jev (que se ejecuta sobre el texto enmascarado cuando
+   los escáneres de tramos no bloquearon) de
+   [`guard/classifier.rs`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/src/guard/classifier.rs).
+   Los escaneos distintos de `pass` emiten un evento estructurado en `synapse::guard`; una
+   comprobación respondida del clasificador o un bloqueo de entrada escribe una fila en el
+   registro de costes con `lane = "guard"` (`guard_classifier` o `guard_input`), y un bloqueo
+   falla con `400 content_blocked` antes de cualquier llamada a un proveedor o al router Jev.
 4. **Elige los tramos.** Una ruta estática usa sus tramos en orden. Una ruta
    `strategy = "jev"` pasa por `plan_tiered`:
    - una petición con un bloque `jev` falla con `400`;
@@ -127,7 +135,9 @@ Cada carril recorre los tramos del plan de forma distinta.
 llama a los proveedores a través del crate `genai`, con el catálogo de proveedores construido en
 [`providers/mod.rs`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/src/providers/mod.rs)
 y
-[`providers/genai_provider.rs`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/src/providers/genai_provider.rs).
+[`providers/genai_provider.rs`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/src/providers/genai_provider.rs),
+con reintentos y circuit breakers por tramo definidos en
+[`resilience.rs`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/src/resilience.rs).
 `to_genai_options` construye las opciones de cada petición, que es donde los campos se reenvían o
 se descartan.
 
@@ -137,7 +147,8 @@ se descartan.
 - `execute_streaming_with_timeouts` abre cada tramo y espera su primer fragmento. El primer tramo
   que produce uno queda fijado; los fallos posteriores llegan al cliente como un evento de
   error.
-- Ambos devuelven `502 all_legs_failed` con el fallo de cada tramo cuando se agota la cadena.
+- Ambos devuelven `502 all_legs_failed` con el fallo de cada tramo cuando se agota la cadena, o
+  `503 all_circuits_open` cuando el circuit breaker de todos los tramos está abierto.
 
 **Carril Vertex nativo.** `Gateway::native_committed` recorre los tramos `vertex` de la cadena,
 convierte el esfuerzo de cada tramo en un presupuesto de razonamiento con `with_leg_thinking` y
@@ -160,7 +171,9 @@ cliente de cada proveedor cuando se construye el gateway en
 
 ## 7. Respuesta {#7-response}
 
-`server.rs` genera el resultado:
+`server.rs` genera el resultado, después de que los `output_scanners` opcionales de
+[`guard/output.rs`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/src/guard/output.rs)
+revisen las respuestas con búfer o retengan `output_holdback_chars` en los streams:
 
 - `openai_json` construye un `chat.completion` mediante el `Accumulator` de
   [`routing/stream.rs`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/src/routing/stream.rs),
@@ -168,13 +181,15 @@ cliente de cada proveedor cuando se construye el gateway en
 - `sse_body` genera un stream como eventos `chat.completion.chunk` con `stream_item_to_sse_json`,
   convierte un error a mitad del stream en un evento de error y añade `[DONE]` al final.
 - `with_routing_headers` añade los encabezados `x-synapse-*` a partir del `RoutingReport` del
-  plan, definido en `routing/jev_router.rs`.
+  plan, definido en `routing/jev_router.rs`, y `with_guard_header` añade `x-synapse-guard`
+  cuando la entrada o la respuesta con búfer se enmascaró o bloqueó.
 - Un `GatewayError` de cualquier paso se convierte en el cuerpo de error JSON y el estado en
   [`error.rs`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/src/error.rs).
 
 ## 8. Contabilidad del uso {#8-usage-accounting}
 
-El uso solo se registra para las peticiones que produjeron una respuesta.
+El uso se registra para las peticiones que produjeron una respuesta, así como para los bloqueos
+de guardrails de entrada y las comprobaciones del clasificador Jev (`lane = "guard"`).
 
 - **Con búfer:** `Gateway::record` en `gateway.rs` calcula el precio del completado con
   [`pricing.rs`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/src/pricing.rs),
@@ -207,15 +222,18 @@ que también construye los exportadores de Prometheus y OTLP. Consulta el
 
 Los demás endpoints siguen caminos más cortos por los mismos componentes:
 
-- **Embeddings.** `Gateway::embed` en `gateway.rs` busca el alias en
+- **Embeddings.** `Gateway::embed_contextual` en `gateway.rs` busca el alias en
   [`routing/embeddings.rs`](https://github.com/sustentabilitas/synapse-gateway/blob/main/crates/synapse-gateway/src/routing/embeddings.rs),
-  recorre sus tramos con los embedders de
+  escanea los elementos de `input` bajo la política de guardrails del alias (`Gateway::guard_lane`
+  con `GuardLane::Embeddings`), recorre sus tramos con los embedders de
   [`embeddings/`](https://github.com/sustentabilitas/synapse-gateway/tree/main/crates/synapse-gateway/src/embeddings)
-  y registra el uso. Sin guardrails, planificación ni carriles.
-- **Passthrough de Gemini.** `gemini_passthrough` en `server.rs` reenvía el cuerpo con
+  y registra el uso.
+- **Passthrough de Gemini.** `gemini_passthrough` en `server.rs` escanea las acciones con
+  contenido mediante `screen_gemini` (`GuardLane::Passthrough`), reenvía el cuerpo con
   `VertexNativeProvider::passthrough_request`, elige los tramos de fallback con
   `RouteTable::vertex_fallback_chain` y mide el uso con un guard de `Drop` como el del streaming.
-- **Passthrough de Jev.** `jev_passthrough` en `server.rs` reenvía el cuerpo a través de
+- **Passthrough de Jev.** `jev_passthrough` en `server.rs` escanea las cadenas de `state` y
+  `questions` bajo la política `default` (`GuardLane::Jev`), reenvía el cuerpo a través de
   `jev_native.rs` y lo mide de la misma forma.
 - **A2A.** Los endpoints del registro vienen del crate `synapse-a2a`, integrados en el router en
   `main.rs`. Consulta [Crates del workspace](./workspace-crates.md#synapse-a2a).

@@ -41,12 +41,13 @@ resto sin error:
 
 ## Resiliencia {#resilience}
 
-- **Sin reintentos ni circuit breakers.** Cada tramo tiene un intento por petición, y un tramo
-  caído se prueba, y falla, en cada petición. La única protección es el siguiente tramo de la
-  cadena. Consulta [Cadenas de fallback](../guides/fallback-chains.md#the-order-of-legs).
-- Los **embeddings** tienen el mismo fallback simple, sin reintentos propios.
-- Las métricas `synapse_resilience_*` existen pero nunca se registran, y los gráficos
-  correspondientes del [panel de Grafana](../operating/grafana-dashboard.md) se quedan vacíos.
+- **Los reintentos y los circuit breakers solo se aplican al carril estándar.** Cada tramo
+  `(provider, model)` del carril estándar tiene su propia política de reintentos y su propio
+  circuit breaker, y registra las métricas `synapse_resilience_*` y los logs
+  `synapse::resilience`. En los carriles Vertex nativo, Jev y de embeddings, cada tramo tiene
+  un intento por petición sin circuit breaker, y el siguiente tramo de la cadena proporciona
+  la conmutación por error. Consulta
+  [Cadenas de fallback](../guides/fallback-chains.md#the-order-of-legs).
 
 ## Tiempos de espera {#timeouts}
 

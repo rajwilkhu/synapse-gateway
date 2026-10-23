@@ -627,7 +627,7 @@ async fn failed_tier_escalates_to_the_next_harder_tier() {
         .and(path("/v1/chat/completions"))
         .and(body_string_contains("\"model\":\"qwen-plus\""))
         .respond_with(ResponseTemplate::new(503).set_body_string("overloaded"))
-        .expect(1)
+        .expect(1..)
         .mount(&qwen)
         .await;
     qwen_serves(

@@ -22,10 +22,14 @@ exact invoice: read [Accuracy](#accuracy) before billing customers from it.
 | An embedding request | `embedding` | The leg that served it; `output_tokens` is 0. |
 | A Gemini `generateContent` or `streamGenerateContent` passthrough call | `passthrough` | `vertex` and the leg's model. |
 | A Jev passthrough call | `passthrough` | `typesafe` and the model called. |
+| An input guardrail scanner block (`op = "guard_input"`) | `guard` | `guard` and the triggered scanner name (e.g. `prompt_injection`); 0 tokens and `$0` cost. |
+| A Jev guardrail classifier check (`op = "guard_classifier"`) | `guard` | `typesafe` and `classifier.model`. |
 
 Failed chat and embedding requests write no row: a non-streaming request that fails, a
-streaming request that fails before its first chunk, a request blocked by guardrails or
-rejected with `400`. A streaming response writes its row when the stream ends, whether it
+streaming request that fails before its first chunk, or a request rejected with `400`. Input
+guardrail blocks and Jev classifier checks write a `lane = "guard"` row (`status = "blocked"`
+when the request is blocked, or `status = "ok"` when the classifier allows the request or runs
+in `observe` / `log` mode). A streaming response writes its row when the stream ends, whether it
 completes, fails or the client disconnects; a stream that fails mid-way is recorded with
 `status` `error`. Passthrough calls write a row even when they fail. Other Gemini
 passthrough actions, such as `countTokens`, are forwarded without a row.
@@ -40,12 +44,12 @@ The gateway creates the `usage_events` table on startup, in SQLite and in Postgr
 | `ts` | When the request finished, in UTC. SQLite stores it as RFC 3339 text. |
 | `tenant`, `workspace`, `user_id`, `thread_id`, `message_id` | Attribution from the request headers; see [Tenant attribution](tenant-attribution.md). |
 | `route` | The route or embedding alias the client called. |
-| `provider`, `model` | The leg that served the request. |
-| `lane` | `standard`, `native`, `jev`, `embedding` or `passthrough`. |
+| `provider`, `model` | The leg that served the request, or `guard` / `typesafe` for guardrail rows. |
+| `lane` | `standard`, `native`, `jev`, `embedding`, `passthrough` or `guard`. |
 | `input_tokens`, `output_tokens` | Token counts reported by the provider. |
 | `cost_usd` | Cost computed from `pricing.toml`. See [Pricing](../configuration/pricing.md#how-cost-is-computed). |
 | `request_id` | The request id, shared by every row one request writes. |
-| `status` | `ok`, or `error` for failed streams and passthrough calls. |
+| `status` | `ok`, `blocked` (for blocked guardrail checks), or `error` for failed streams and passthrough calls. |
 | `user_task_type`, `ai_task_type` | Task classification; see [AI task types](tenant-attribution.md#ai-task-types). |
 
 ## Sinks
@@ -109,9 +113,9 @@ The Pub/Sub and SNS sinks publish one JSON event per row, in camelCase, with the
 
 `workspace`, `user`, `threadId`, `messageId` and `userTaskType` appear only when set. `op`
 says what produced the event: `chat` for a chat completion or a Gemini passthrough call,
-`embedding`, `route_decision` for a Jev router decision, or `systemone` for a Jev
-passthrough call. The database tables have no `op`
-column.
+`embedding`, `route_decision` for a Jev router decision, `guard_input` for an input guardrail
+scanner block, `guard_classifier` for a Jev guardrail classifier check, or `systemone` for a
+Jev passthrough call. The database tables have no `op` column.
 
 Each message also carries attributes for subscription filters: `EventType`
 (`Ledger.LLMTokensConsumed`), `namespace`, `requestId`, `type`, `provider` and `status`.

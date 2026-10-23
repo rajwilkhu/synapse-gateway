@@ -191,6 +191,20 @@ policy, and no setting gives this endpoint a different policy.
 
 ## Jev lane and Jev router
 
-The Jev lane answers your questions. The [Jev router](jev-router.md) is a different feature
-that uses Jev to pick a model tier for ordinary chat requests. A `jev` block sent to a
-`strategy = "jev"` route returns `400`.
+Synapse uses TypeSafe System One (Jev) in five distinct ways across the gateway:
+
+1. **Guardrail semantic classifier (`[guardrails.<name>.classifier]`)**: Evaluates policy `noul`
+   questions against the post-mask input across every lane before any routing decision or provider
+   call. See [Where and how Jev is used](../configuration/guardrails-policy.md#where-and-how-jev-is-used)
+   and [Classifier](../configuration/guardrails-policy.md#classifier).
+2. **Jev router (`strategy = "jev"`)**: Evaluates `difficulty` (`score`) and `needs_reasoning`
+   (`noul`) on ordinary chat requests to pick a model tier and reasoning effort. See
+   [Jev router](jev-router.md). A `jev` block sent to a `strategy = "jev"` route returns `400`.
+3. **Jev lane (`jev.questions`)**: Evaluates caller-supplied `choice`, `score`, or `noul`
+   questions on a route's `typesafe` legs and returns the structured `answers` map as a
+   `chat.completion`.
+4. **Hybrid extraction (`jev.extract`)**: Uses Jev `noul` questions to gate candidates
+   (`noul >= floor`) and extracts structured JSON only from surviving candidates using the
+   route's chat legs.
+5. **Jev passthrough (`POST /typesafe/v1/systemone`)**: Forwards a native `{state, questions}`
+   body verbatim to TypeSafe after screening under the `default` guardrail policy.

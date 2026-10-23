@@ -24,14 +24,19 @@ como una factura exacta: lee [Precisión](#accuracy) antes de facturar a cliente
 | Una petición de embeddings | `embedding` | El tramo que la sirvió; `output_tokens` es 0. |
 | Una llamada passthrough de Gemini `generateContent` o `streamGenerateContent` | `passthrough` | `vertex` y el modelo del tramo. |
 | Una llamada passthrough de Jev | `passthrough` | `typesafe` y el modelo llamado. |
+| Un bloqueo de escáner de guardrail de entrada (`op = "guard_input"`) | `guard` | `guard` y el nombre del escáner activado (por ejemplo `prompt_injection`); 0 tokens y coste `$0`. |
+| Una comprobación del clasificador Jev de guardrails (`op = "guard_classifier"`) | `guard` | `typesafe` y `classifier.model`. |
 
 Las peticiones de chat y de embeddings fallidas no escriben ninguna fila: una petición sin
-streaming que falla, una petición con streaming que falla antes de su primer fragmento, una
-petición bloqueada por los guardrails o rechazada con `400`. Una respuesta con streaming
-escribe su fila cuando termina el stream, tanto si se completa como si falla o el cliente se
-desconecta; un stream que falla a mitad de camino se registra con `status` `error`. Las
-llamadas passthrough escriben una fila incluso cuando fallan. Otras acciones passthrough de
-Gemini, como `countTokens`, se reenvían sin fila.
+streaming que falla, una petición con streaming que falla antes de su primer fragmento o una
+petición rechazada con `400`. Los bloqueos de guardrails de entrada y las comprobaciones del
+clasificador Jev escriben una fila con `lane = "guard"` (`status = "blocked"` cuando la
+petición se bloquea, o `status = "ok"` cuando el clasificador permite la petición o se ejecuta
+en modo `observe` / `log`). Una respuesta con streaming escribe su fila cuando termina el
+stream, tanto si se completa como si falla o el cliente se desconecta; un stream que falla a
+mitad de camino se registra con `status` `error`. Las llamadas passthrough escriben una fila
+incluso cuando fallan. Otras acciones passthrough de Gemini, como `countTokens`, se reenvían
+sin fila.
 
 ## Formato de las filas {#row-format}
 
@@ -43,12 +48,12 @@ El gateway crea la tabla `usage_events` al arrancar, en SQLite y en Postgres:
 | `ts` | Cuándo terminó la petición, en UTC. SQLite lo guarda como texto RFC 3339. |
 | `tenant`, `workspace`, `user_id`, `thread_id`, `message_id` | Atribución a partir de los encabezados de la petición; consulta [Atribución por tenant](tenant-attribution.md). |
 | `route` | La ruta o el alias de embeddings al que llamó el cliente. |
-| `provider`, `model` | El tramo que sirvió la petición. |
-| `lane` | `standard`, `native`, `jev`, `embedding` o `passthrough`. |
+| `provider`, `model` | El tramo que sirvió la petición, o `guard` / `typesafe` para las filas de guardrails. |
+| `lane` | `standard`, `native`, `jev`, `embedding`, `passthrough` o `guard`. |
 | `input_tokens`, `output_tokens` | Número de tokens informado por el proveedor. |
 | `cost_usd` | Coste calculado a partir de `pricing.toml`. Consulta [Precios](../configuration/pricing.md#how-cost-is-computed). |
 | `request_id` | El id de la petición, compartido por todas las filas que escribe una misma petición. |
-| `status` | `ok`, o `error` para streams y llamadas passthrough fallidos. |
+| `status` | `ok`, `blocked` (para comprobaciones de guardrails bloqueadas), o `error` para streams y llamadas passthrough fallidos. |
 | `user_task_type`, `ai_task_type` | Clasificación de la tarea; consulta [Tipos de tarea de IA](tenant-attribution.md#ai-task-types). |
 
 ## Destinos {#sinks}
@@ -115,9 +120,10 @@ Los destinos Pub/Sub y SNS publican un evento JSON por fila, en camelCase, con e
 
 `workspace`, `user`, `threadId`, `messageId` y `userTaskType` solo aparecen cuando tienen
 valor. `op` indica qué produjo el evento: `chat` para un chat completion o una llamada
-passthrough de Gemini, `embedding`, `route_decision` para una decisión del router Jev, o
-`systemone` para una llamada passthrough de Jev. Las tablas de la base de datos no tienen
-columna `op`.
+passthrough de Gemini, `embedding`, `route_decision` para una decisión del router Jev,
+`guard_input` para un bloqueo de escáner de guardrail de entrada, `guard_classifier` para una
+comprobación del clasificador Jev de guardrails, o `systemone` para una llamada passthrough de
+Jev. Las tablas de la base de datos no tienen columna `op`.
 
 Cada mensaje lleva también atributos para filtros de suscripción: `EventType`
 (`Ledger.LLMTokensConsumed`), `namespace`, `requestId`, `type`, `provider` y `status`. Los

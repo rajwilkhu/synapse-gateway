@@ -25,9 +25,11 @@ cadena que conmuta de Vertex AI a OpenAI.
   [Proveedores](../configuration/providers.md#strict-and-lenient-validation).
 
 Cada petición la sirve un solo tramo. Synapse nunca envía la misma petición a dos tramos a la
-vez. Cada tramo tiene exactamente un intento por petición: las peticiones de chat no tienen
-reintentos sobre el mismo tramo ni circuit breakers, así que un tramo caído se prueba, y
-falla, en cada petición. Consulta
+vez. En el **carril estándar**, cada tramo `(provider, model)` tiene su propio circuit breaker
+y su política de reintentos (hasta 3 intentos en total con backoff exponencial ante errores
+transitorios antes de conmutar al siguiente tramo, y omitiendo los tramos cuyo circuit breaker
+esté abierto). En los carriles Vertex nativo, Jev y de embeddings, cada tramo tiene un intento
+por petición. Consulta
 [Limitaciones y hoja de ruta](../reference/limitations-roadmap.md#resilience).
 
 ## Qué pasa al siguiente tramo {#what-moves-to-the-next-leg}
@@ -84,7 +86,7 @@ y se omite un tramo cuyo proveedor no esté configurado. Consulta
 
 | Carril | Respuesta |
 |---|---|
-| Estándar | `502` con el código de error `all_legs_failed` y un array `failures` que indica el proveedor, el modelo y el mensaje de error de cada tramo. |
+| Estándar | `502` con el código de error `all_legs_failed` y un array `failures` que indica el proveedor, el modelo y el mensaje de error de cada tramo, o `503` con `all_circuits_open` cuando el circuit breaker de todos los tramos está abierto. |
 | Vertex nativo | `502` con el código de error `upstream_error` y el error del último tramo. |
 | Jev, sin otros tramos | `502` con el código de error `all_legs_failed`. |
 

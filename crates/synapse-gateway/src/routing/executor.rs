@@ -188,7 +188,74 @@ fn is_genai_retryable(e: &genai::Error) -> bool {
         genai::Error::WebModelCall { webc_error, .. } => webc_retryable(webc_error),
         genai::Error::WebAdapterCall { webc_error, .. } => webc_retryable(webc_error),
         genai::Error::HttpError { status, .. } => status_retryable(*status),
+        genai::Error::WebStream { error, .. } => {
+            if let Some(inner) = error.downcast_ref::<genai::Error>() {
+                is_genai_retryable(inner)
+            } else if let Some(re) = error.downcast_ref::<reqwest::Error>() {
+                re.is_timeout() || re.is_connect() || re.status().is_some_and(status_retryable)
+            } else {
+                false
+            }
+        }
         _ => false,
+    }
+}
+
+fn genai_error_status(e: &genai::Error) -> Option<u16> {
+    fn webc_status(we: &genai::webc::Error) -> Option<u16> {
+        match we {
+            genai::webc::Error::ResponseFailedStatus { status, .. } => Some(status.as_u16()),
+            genai::webc::Error::Reqwest(re) => re.status().map(|s| s.as_u16()),
+            _ => None,
+        }
+    }
+    match e {
+        genai::Error::WebModelCall { webc_error, .. }
+        | genai::Error::WebAdapterCall { webc_error, .. } => webc_status(webc_error),
+        genai::Error::HttpError { status, .. } => Some(status.as_u16()),
+        genai::Error::WebStream { error, .. } => {
+            if let Some(inner) = error.downcast_ref::<genai::Error>() {
+                genai_error_status(inner)
+            } else if let Some(re) = error.downcast_ref::<reqwest::Error>() {
+                re.status().map(|s| s.as_u16())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn genai_error_kind(e: &genai::Error) -> &'static str {
+    fn webc_kind(we: &genai::webc::Error) -> &'static str {
+        match we {
+            genai::webc::Error::ResponseFailedStatus { .. } => "http_status",
+            genai::webc::Error::Reqwest(re) if re.is_timeout() => "timeout",
+            genai::webc::Error::Reqwest(re) if re.is_connect() => "connect",
+            genai::webc::Error::Reqwest(_) => "transport",
+            _ => "webc_error",
+        }
+    }
+    match e {
+        genai::Error::WebModelCall { webc_error, .. }
+        | genai::Error::WebAdapterCall { webc_error, .. } => webc_kind(webc_error),
+        genai::Error::HttpError { .. } => "http_status",
+        genai::Error::WebStream { error, .. } => {
+            if let Some(inner) = error.downcast_ref::<genai::Error>() {
+                genai_error_kind(inner)
+            } else if let Some(re) = error.downcast_ref::<reqwest::Error>() {
+                if re.is_timeout() {
+                    "timeout"
+                } else if re.is_connect() {
+                    "connect"
+                } else {
+                    "transport"
+                }
+            } else {
+                "web_stream"
+            }
+        }
+        _ => "genai_error",
     }
 }
 
@@ -236,6 +303,71 @@ impl ToolIndexer {
     }
 }
 
+/// State threaded across a genai event stream.
+struct St<S> {
+    inner: S,
+    indexer: ToolIndexer,
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+async fn next_genai_item<S>(st: &mut St<S>) -> Option<Result<StreamItem, genai::Error>>
+where
+    S: Stream<Item = Result<genai::chat::ChatStreamEvent, genai::Error>> + Unpin,
+{
+    loop {
+        match st.inner.next().await {
+            None => return None,
+            Some(Err(e)) => return Some(Err(e)),
+            Some(Ok(ev)) => match ev {
+                genai::chat::ChatStreamEvent::Chunk(c) => {
+                    if !c.content.is_empty() {
+                        return Some(Ok(StreamItem::Delta(c.content)));
+                    }
+                }
+                genai::chat::ChatStreamEvent::ToolCallChunk(tc) => {
+                    let call = tc.tool_call;
+                    let (index, first) = st.indexer.index_of(&call.call_id);
+                    let args = match &call.fn_arguments {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    return Some(Ok(StreamItem::ToolCallDelta {
+                        index,
+                        id: if first { Some(call.call_id) } else { None },
+                        name: if first { Some(call.fn_name) } else { None },
+                        args_fragment: args,
+                    }));
+                }
+                genai::chat::ChatStreamEvent::End(end) => {
+                    if let Some(u) = &end.captured_usage {
+                        st.input_tokens = u.prompt_tokens.unwrap_or(0).max(0) as u64;
+                        st.output_tokens = u.completion_tokens.unwrap_or(0).max(0) as u64;
+                    }
+                    let done = StreamItem::Done {
+                        input_tokens: st.input_tokens,
+                        output_tokens: st.output_tokens,
+                        finish_reason: map_stop_reason(end.captured_stop_reason.as_ref()),
+                    };
+                    return Some(Ok(done));
+                }
+                _ => {} // Start / ReasoningChunk / ThoughtSignatureChunk ignored; loop for next
+            },
+        }
+    }
+}
+
+fn normalized_stream<S>(state: St<S>) -> impl Stream<Item = Result<StreamItem, LegError>>
+where
+    S: Stream<Item = Result<genai::chat::ChatStreamEvent, genai::Error>> + Unpin,
+{
+    futures::stream::unfold(state, |mut st| async move {
+        next_genai_item(&mut st)
+            .await
+            .map(|r| (r.map_err(|e| LegError::MidStream(e.to_string())), st))
+    })
+}
+
 /// Standard-lane per-leg primitive: open a genai stream, normalize to `StreamItem`.
 /// Outer `Err(LegError::Start)` = stream could not begin (fallback-eligible).
 pub async fn stream_one_leg_standard(
@@ -255,15 +387,6 @@ pub async fn stream_one_leg_standard(
         .await
         .map_err(|e| LegError::Start(e.to_string()))?;
 
-    // State threaded across the whole stream. Use `unfold` to own the state
-    // cleanly (a stateful `flat_map` closure can also work; unfold avoids
-    // borrow-checker friction with FnMut captures).
-    struct St<S> {
-        inner: S,
-        indexer: ToolIndexer,
-        input_tokens: u64,
-        output_tokens: u64,
-    }
     let state = St {
         inner: Box::pin(resp.stream),
         indexer: ToolIndexer::default(),
@@ -271,53 +394,7 @@ pub async fn stream_one_leg_standard(
         output_tokens: 0,
     };
 
-    let normalized = futures::stream::unfold(state, |mut st| async move {
-        loop {
-            match st.inner.next().await {
-                None => return None,
-                Some(Err(e)) => return Some((Err(LegError::MidStream(e.to_string())), st)),
-                Some(Ok(ev)) => match ev {
-                    genai::chat::ChatStreamEvent::Chunk(c) => {
-                        if !c.content.is_empty() {
-                            return Some((Ok(StreamItem::Delta(c.content)), st));
-                        }
-                    }
-                    genai::chat::ChatStreamEvent::ToolCallChunk(tc) => {
-                        let call = tc.tool_call;
-                        let (index, first) = st.indexer.index_of(&call.call_id);
-                        let args = match &call.fn_arguments {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        return Some((
-                            Ok(StreamItem::ToolCallDelta {
-                                index,
-                                id: if first { Some(call.call_id) } else { None },
-                                name: if first { Some(call.fn_name) } else { None },
-                                args_fragment: args,
-                            }),
-                            st,
-                        ));
-                    }
-                    genai::chat::ChatStreamEvent::End(end) => {
-                        if let Some(u) = &end.captured_usage {
-                            st.input_tokens = u.prompt_tokens.unwrap_or(0).max(0) as u64;
-                            st.output_tokens = u.completion_tokens.unwrap_or(0).max(0) as u64;
-                        }
-                        let done = StreamItem::Done {
-                            input_tokens: st.input_tokens,
-                            output_tokens: st.output_tokens,
-                            finish_reason: map_stop_reason(end.captured_stop_reason.as_ref()),
-                        };
-                        return Some((Ok(done), st));
-                    }
-                    _ => {} // Start / ReasoningChunk / ThoughtSignatureChunk ignored; loop for next
-                },
-            }
-        }
-    });
-
-    Ok(normalized)
+    Ok(normalized_stream(state))
 }
 
 #[cfg(test)]
@@ -674,6 +751,183 @@ mod tests {
             None
         );
     }
+
+    #[tokio::test]
+    async fn execute_buffered_retries_transient_503_before_succeeding() {
+        use crate::providers::Catalog;
+        use crate::routing::table::ChainLeg;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("busy"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&srv)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\n\
+                         data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n\
+                         data: [DONE]\n\n",
+                    ),
+            )
+            .expect(1)
+            .mount(&srv)
+            .await;
+
+        let catalog = Catalog::for_test(vec![("p1", format!("{}/v1", srv.uri()))]);
+        #[cfg(feature = "server")]
+        let exporter = {
+            let (m, exporter) = crate::telemetry::test_metrics();
+            catalog.attach_metrics(&m);
+            exporter
+        };
+        let legs = vec![ChainLeg {
+            provider: "p1".into(),
+            model: "m".into(),
+            ..Default::default()
+        }];
+        let r =
+            req(serde_json::json!({"model":"route","messages":[{"role":"user","content":"hi"}]}));
+        let c = execute_buffered(&catalog, "route", &legs, &r)
+            .await
+            .unwrap();
+        assert_eq!(c.content, "recovered");
+        assert_eq!(c.provider, "p1");
+        #[cfg(feature = "server")]
+        {
+            let text = crate::telemetry::scrape(&exporter);
+            assert!(
+                text.lines()
+                    .any(|l| l == r#"synapse_resilience_retry_attempts_total{label="p1"} 1"#),
+                "expected retry metric in:\n{text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_buffered_opens_circuit_breaker_and_returns_all_circuits_open() {
+        use crate::providers::Catalog;
+        use crate::routing::table::ChainLeg;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let srv = MockServer::start().await;
+        // Return 400 (non-retryable, so 1 HTTP call per execute_buffered invocation)
+        // 5 times to trip the Profile::Default (breaker_threshold=5) breaker; the
+        // 6th call must be short-circuited without hitting wiremock.
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad"))
+            .expect(5)
+            .mount(&srv)
+            .await;
+
+        let catalog = Catalog::for_test(vec![("p1", format!("{}/v1", srv.uri()))]);
+        let legs = vec![ChainLeg {
+            provider: "p1".into(),
+            model: "m".into(),
+            ..Default::default()
+        }];
+        let r =
+            req(serde_json::json!({"model":"route","messages":[{"role":"user","content":"hi"}]}));
+
+        for _ in 0..5 {
+            assert!(matches!(
+                execute_buffered(&catalog, "route", &legs, &r).await,
+                Err(GatewayError::AllLegsFailed { .. })
+            ));
+        }
+        // Sixth call: breaker is open, so AllCircuitsOpen is returned with no 6th HTTP call.
+        assert!(matches!(
+            execute_buffered(&catalog, "route", &legs, &r).await,
+            Err(GatewayError::AllCircuitsOpen(ref route)) if route == "route"
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_buffered_and_streaming_emit_fallback_logs() {
+        use crate::providers::Catalog;
+        use crate::routing::table::ChainLeg;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        crate::guard::classifier::tests::capture_logs();
+
+        let bad = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("secret_prompt_echo"))
+            .mount(&bad)
+            .await;
+        let good = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+                         data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n\
+                         data: [DONE]\n\n",
+                    ),
+            )
+            .mount(&good)
+            .await;
+
+        let catalog = Catalog::for_test(vec![
+            ("p1", format!("{}/v1", bad.uri())),
+            ("p2", format!("{}/v1", good.uri())),
+        ]);
+        let legs = vec![
+            ChainLeg {
+                provider: "p1".into(),
+                model: "m1".into(),
+                ..Default::default()
+            },
+            ChainLeg {
+                provider: "p2".into(),
+                model: "m2".into(),
+                ..Default::default()
+            },
+        ];
+        let _ = crate::guard::classifier::tests::take_logs();
+
+        let r =
+            req(serde_json::json!({"model":"route","messages":[{"role":"user","content":"hi"}]}));
+        let _ = execute_buffered(&catalog, "route", &legs, &r)
+            .await
+            .unwrap();
+        let _ = execute_streaming(&catalog, "route", &legs, &r)
+            .await
+            .unwrap();
+
+        let logs = crate::guard::classifier::tests::take_logs();
+        let fallback_lines: Vec<_> = logs
+            .lines()
+            .filter(|l| {
+                l.contains("synapse::routing") && l.contains("leg failed; falling back to next leg")
+            })
+            .collect();
+        assert_eq!(fallback_lines.len(), 2, "logs:\n{logs}");
+        for line in fallback_lines {
+            assert!(
+                line.contains(r#"route="route" provider=p1 model=m1 next_provider=p2 next_model=m2 error.kind="http_status" http.status=Some(400)"#),
+                "unexpected fallback line: {line}"
+            );
+            assert!(
+                !line.contains("secret_prompt_echo"),
+                "synapse fallback logs must not leak upstream error bodies: {line}"
+            );
+        }
+    }
 }
 
 async fn run_one_leg(
@@ -716,6 +970,26 @@ async fn run_one_leg(
     })
 }
 
+fn log_leg_fallback(
+    route: &str,
+    leg: &ChainLeg,
+    next: &ChainLeg,
+    kind: &'static str,
+    status: Option<u16>,
+) {
+    tracing::warn!(
+        target: "synapse::routing",
+        route,
+        provider = %leg.provider,
+        model = %leg.model,
+        next_provider = %next.provider,
+        next_model = %next.model,
+        error.kind = kind,
+        http.status = ?status,
+        "leg failed; falling back to next leg"
+    );
+}
+
 /// Walk legs in order. Retryable failure (or open breaker) advances; the first
 /// non-retryable failure aborts. Returns `AllLegsFailed` if every leg fails.
 pub async fn execute_chain(
@@ -726,7 +1000,7 @@ pub async fn execute_chain(
 ) -> Result<Completion, GatewayError> {
     let mut failures: Vec<LegFailure> = Vec::new();
     let mut all_circuit_open = true;
-    for leg in legs {
+    for (i, leg) in legs.iter().enumerate() {
         let provider = catalog.get(&leg.provider).ok_or_else(|| {
             GatewayError::BadRequest(format!(
                 "route '{route_name}' references unbuilt provider '{}'",
@@ -735,14 +1009,21 @@ pub async fn execute_chain(
         })?;
         match run_one_leg(provider, leg, req).await {
             Ok(c) => return Ok(c),
-            Err(ResilienceError::CircuitOpen { name }) => failures.push(LegFailure {
-                provider: leg.provider.clone(),
-                model: leg.model.clone(),
-                message: format!("circuit open: {name}"),
-            }),
+            Err(ResilienceError::CircuitOpen { name }) => {
+                if let Some(next) = legs.get(i + 1) {
+                    log_leg_fallback(route_name, leg, next, "circuit_open", None);
+                }
+                failures.push(LegFailure {
+                    provider: leg.provider.clone(),
+                    model: leg.model.clone(),
+                    message: format!("circuit open: {name}"),
+                });
+            }
             Err(ResilienceError::Exhausted(e)) => {
                 all_circuit_open = false;
                 let retryable = is_genai_retryable(&e);
+                let kind = genai_error_kind(&e);
+                let status = genai_error_status(&e);
                 failures.push(LegFailure {
                     provider: leg.provider.clone(),
                     model: leg.model.clone(),
@@ -750,6 +1031,9 @@ pub async fn execute_chain(
                 });
                 if !retryable {
                     break; // non-retryable: abort the chain
+                }
+                if let Some(next) = legs.get(i + 1) {
+                    log_leg_fallback(route_name, leg, next, kind, status);
                 }
             }
         }
@@ -781,39 +1065,191 @@ impl Default for StreamTimeouts {
     }
 }
 
-/// Like `buffer_one_leg` but bounded by first-chunk and inter-chunk idle timeouts.
+enum StartError {
+    Genai(genai::Error),
+    FirstChunkTimeout,
+    EmptyStream,
+}
+
+impl std::fmt::Debug for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StartError::Genai(e) => match genai_error_status(e) {
+                Some(status) => write!(f, "{}({status})", genai_error_kind(e)),
+                None => write!(f, "{}", genai_error_kind(e)),
+            },
+            StartError::FirstChunkTimeout => write!(f, "first_chunk_timeout"),
+            StartError::EmptyStream => write!(f, "empty_stream"),
+        }
+    }
+}
+
+impl StartError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            StartError::Genai(e) => is_genai_retryable(e),
+            StartError::FirstChunkTimeout | StartError::EmptyStream => false,
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            StartError::Genai(e) => genai_error_kind(e),
+            StartError::FirstChunkTimeout => "first_chunk_timeout",
+            StartError::EmptyStream => "empty_stream",
+        }
+    }
+
+    fn status(&self) -> Option<u16> {
+        match self {
+            StartError::Genai(e) => genai_error_status(e),
+            StartError::FirstChunkTimeout | StartError::EmptyStream => None,
+        }
+    }
+
+    fn into_leg_error(self) -> LegError {
+        match self {
+            StartError::Genai(e) => LegError::Start(e.to_string()),
+            StartError::FirstChunkTimeout => LegError::Start("first-chunk timeout".into()),
+            StartError::EmptyStream => LegError::Start("empty stream".into()),
+        }
+    }
+}
+
+/// Open a genai stream for `leg` and await its first `StreamItem` within
+/// `first_chunk`, wrapped in `provider.breaker` and retry policy.
+async fn commit_one_leg(
+    provider: &Arc<Provider>,
+    leg: &ChainLeg,
+    req: &ChatRequest,
+    first_chunk: std::time::Duration,
+) -> Result<CommittedStream, ResilienceError<StartError>> {
+    let client = provider.client.clone();
+    let provider_id = leg.provider.clone();
+    let model = leg.model.clone();
+    let chat_req = to_genai_request(req);
+    let opts = to_genai_options(req, leg.effort)
+        .with_capture_usage(true)
+        .with_capture_tool_calls(true);
+
+    run_with_classifier(
+        move || {
+            let (client, provider_id, model, chat_req, opts) = (
+                client.clone(),
+                provider_id.clone(),
+                model.clone(),
+                chat_req.clone(),
+                opts.clone(),
+            );
+            async move {
+                let resp = client
+                    .exec_chat_stream(model.clone(), chat_req, Some(&opts))
+                    .await
+                    .map_err(StartError::Genai)?;
+                let mut state = St {
+                    inner: Box::pin(resp.stream),
+                    indexer: ToolIndexer::default(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                };
+                match tokio::time::timeout(first_chunk, next_genai_item(&mut state)).await {
+                    Err(_) => Err(StartError::FirstChunkTimeout),
+                    Ok(None) => Err(StartError::EmptyStream),
+                    Ok(Some(Err(e))) => Err(StartError::Genai(e)),
+                    Ok(Some(Ok(first))) => {
+                        let rest = futures::stream::once(async move { Ok(first) })
+                            .chain(normalized_stream(state));
+                        Ok(CommittedStream {
+                            provider: provider_id,
+                            model,
+                            stream: rest.boxed(),
+                        })
+                    }
+                }
+            }
+        },
+        provider.profile,
+        &provider.breaker,
+        provider.label,
+        StartError::is_retryable,
+    )
+    .await
+}
+
+enum BufferedLegError {
+    CircuitOpen {
+        name: String,
+    },
+    Failed {
+        error: LegError,
+        kind: &'static str,
+        status: Option<u16>,
+    },
+}
+
+/// Like `buffer_one_leg` but bounded by first-chunk and inter-chunk idle timeouts,
+/// with per-leg circuit-breaker and retry on stream start.
 async fn buffer_one_leg_timed(
     catalog: &Catalog,
     leg: &ChainLeg,
     req: &ChatRequest,
     t: StreamTimeouts,
-) -> Result<Completion, LegError> {
+) -> Result<Completion, BufferedLegError> {
     let provider = catalog
         .get(&leg.provider)
-        .ok_or_else(|| LegError::Start(format!("unbuilt provider '{}'", leg.provider)))?;
-    let stream = stream_one_leg_standard(provider, &leg.model, req, leg.effort).await?;
-    let mut stream = std::pin::pin!(stream);
+        .ok_or_else(|| BufferedLegError::Failed {
+            error: LegError::Start(format!("unbuilt provider '{}'", leg.provider)),
+            kind: "unbuilt_provider",
+            status: None,
+        })?;
+    let committed = match commit_one_leg(provider, leg, req, t.first_chunk).await {
+        Ok(c) => c,
+        Err(ResilienceError::CircuitOpen { name }) => {
+            return Err(BufferedLegError::CircuitOpen { name });
+        }
+        Err(ResilienceError::Exhausted(se)) => {
+            let kind = se.kind();
+            let status = se.status();
+            return Err(BufferedLegError::Failed {
+                error: se.into_leg_error(),
+                kind,
+                status,
+            });
+        }
+    };
+    let mut stream = committed.stream;
     let mut acc = Accumulator::default();
-    let mut first = true;
     loop {
-        let budget = if first { t.first_chunk } else { t.idle };
-        match tokio::time::timeout(budget, stream.next()).await {
+        match tokio::time::timeout(t.idle, stream.next()).await {
             Err(_) => {
-                return Err(if first {
-                    LegError::Start("first-chunk timeout".into())
-                } else {
-                    LegError::MidStream("idle timeout".into())
-                })
+                let error = LegError::MidStream("idle timeout".into());
+                provider.breaker.record::<(), &LegError>(&Err(&error));
+                return Err(BufferedLegError::Failed {
+                    error,
+                    kind: "idle_timeout",
+                    status: None,
+                });
             }
             Ok(None) => break,
-            Ok(Some(item)) => {
-                acc.push(item?);
-                first = false;
+            Ok(Some(Ok(item))) => acc.push(item),
+            Ok(Some(Err(error))) => {
+                provider.breaker.record::<(), &LegError>(&Err(&error));
+                return Err(BufferedLegError::Failed {
+                    error,
+                    kind: "mid_stream",
+                    status: None,
+                });
             }
         }
     }
     if !acc.got_done {
-        return Err(LegError::MidStream("stream ended before completion".into()));
+        let error = LegError::MidStream("stream ended before completion".into());
+        provider.breaker.record::<(), &LegError>(&Err(&error));
+        return Err(BufferedLegError::Failed {
+            error,
+            kind: "incomplete_stream",
+            status: None,
+        });
     }
     Ok(Completion {
         provider: leg.provider.clone(),
@@ -838,15 +1274,39 @@ pub async fn execute_buffered_with_timeouts(
     t: StreamTimeouts,
 ) -> Result<Completion, GatewayError> {
     let mut failures: Vec<LegFailure> = Vec::new();
-    for leg in legs {
+    let mut all_circuit_open = true;
+    for (i, leg) in legs.iter().enumerate() {
         match buffer_one_leg_timed(catalog, leg, req, t).await {
             Ok(c) => return Ok(c),
-            Err(e) => failures.push(LegFailure {
-                provider: leg.provider.clone(),
-                model: leg.model.clone(),
-                message: e.to_string(),
-            }),
+            Err(BufferedLegError::CircuitOpen { name }) => {
+                if let Some(next) = legs.get(i + 1) {
+                    log_leg_fallback(route_name, leg, next, "circuit_open", None);
+                }
+                failures.push(LegFailure {
+                    provider: leg.provider.clone(),
+                    model: leg.model.clone(),
+                    message: format!("circuit open: {name}"),
+                });
+            }
+            Err(BufferedLegError::Failed {
+                error,
+                kind,
+                status,
+            }) => {
+                all_circuit_open = false;
+                if let Some(next) = legs.get(i + 1) {
+                    log_leg_fallback(route_name, leg, next, kind, status);
+                }
+                failures.push(LegFailure {
+                    provider: leg.provider.clone(),
+                    model: leg.model.clone(),
+                    message: error.to_string(),
+                });
+            }
         }
+    }
+    if all_circuit_open && !failures.is_empty() {
+        return Err(GatewayError::AllCircuitsOpen(route_name.to_string()));
     }
     Err(GatewayError::AllLegsFailed {
         route: route_name.to_string(),
@@ -857,10 +1317,6 @@ pub async fn execute_buffered_with_timeouts(
 /// Buffered (non-streaming) executor: walk legs, fully buffering each. Any
 /// failure (start or mid-stream) advances to the next leg. Nothing is ever
 /// flushed to the client, so full-chain fallback is preserved.
-///
-/// Unlike [`execute_chain`], the connection phase here is NOT yet wrapped in the
-/// per-leg circuit-breaker/retry — a tracked follow-up. The streaming path trades
-/// that resilience plumbing for guaranteed whole-response fallback.
 ///
 /// Delegates to [`execute_buffered_with_timeouts`] with [`StreamTimeouts::default`].
 pub async fn execute_buffered(
@@ -908,11 +1364,16 @@ pub async fn execute_streaming_with_timeouts(
     t: StreamTimeouts,
 ) -> Result<CommittedStream, GatewayError> {
     let mut failures: Vec<LegFailure> = Vec::new();
+    let mut all_circuit_open = true;
 
-    for leg in legs {
+    for (i, leg) in legs.iter().enumerate() {
         let provider = match catalog.get(&leg.provider) {
             Some(p) => p,
             None => {
+                all_circuit_open = false;
+                if let Some(next) = legs.get(i + 1) {
+                    log_leg_fallback(route_name, leg, next, "unbuilt_provider", None);
+                }
                 failures.push(LegFailure {
                     provider: leg.provider.clone(),
                     model: leg.model.clone(),
@@ -921,49 +1382,35 @@ pub async fn execute_streaming_with_timeouts(
                 continue;
             }
         };
-        let started = match stream_one_leg_standard(provider, &leg.model, req, leg.effort).await {
-            Ok(s) => s,
-            Err(e) => {
+        match commit_one_leg(provider, leg, req, t.first_chunk).await {
+            Ok(committed) => return Ok(committed),
+            Err(ResilienceError::CircuitOpen { name }) => {
+                if let Some(next) = legs.get(i + 1) {
+                    log_leg_fallback(route_name, leg, next, "circuit_open", None);
+                }
                 failures.push(LegFailure {
                     provider: leg.provider.clone(),
                     model: leg.model.clone(),
-                    message: e.to_string(),
+                    message: format!("circuit open: {name}"),
                 });
-                continue;
             }
-        };
-        let mut stream = Box::pin(started);
-        match tokio::time::timeout(t.first_chunk, stream.next()).await {
-            Err(_) => {
+            Err(ResilienceError::Exhausted(se)) => {
+                all_circuit_open = false;
+                let kind = se.kind();
+                let status = se.status();
+                if let Some(next) = legs.get(i + 1) {
+                    log_leg_fallback(route_name, leg, next, kind, status);
+                }
                 failures.push(LegFailure {
                     provider: leg.provider.clone(),
                     model: leg.model.clone(),
-                    message: "first-chunk timeout".into(),
-                });
-            }
-            Ok(Some(Ok(first))) => {
-                let rest = futures::stream::once(async move { Ok(first) }).chain(stream);
-                return Ok(CommittedStream {
-                    provider: leg.provider.clone(),
-                    model: leg.model.clone(),
-                    stream: rest.boxed(),
-                });
-            }
-            Ok(Some(Err(e))) => {
-                failures.push(LegFailure {
-                    provider: leg.provider.clone(),
-                    model: leg.model.clone(),
-                    message: e.to_string(),
-                });
-            }
-            Ok(None) => {
-                failures.push(LegFailure {
-                    provider: leg.provider.clone(),
-                    model: leg.model.clone(),
-                    message: "empty stream".into(),
+                    message: se.into_leg_error().to_string(),
                 });
             }
         }
+    }
+    if all_circuit_open && !failures.is_empty() {
+        return Err(GatewayError::AllCircuitsOpen(route_name.to_string()));
     }
     Err(GatewayError::AllLegsFailed {
         route: route_name.to_string(),
