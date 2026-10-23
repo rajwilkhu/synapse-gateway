@@ -47,7 +47,7 @@ Incoming request (chat / passthrough / embeddings / jev)
                                                 ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 2. Jev semantic classifier (optional [guardrails.<name>.classifier])    │
-│    • Scores masked text (head+tail budget ≤ 16,000 chars) via Jev       │
+│    • Scores masked text (head+tail budget ≤ 24,000 chars) via Jev       │
 │    • Writes lane="guard", op="guard_classifier" ledger row              │
 │    • Each question with score ≥ threshold triggers block / observe / log│
 └───────────────┬───────────────────────────────┬─────────────────────────┘
@@ -63,6 +63,74 @@ Incoming request (chat / passthrough / embeddings / jev)
 │      mask crossing spans whole, or halt stream with content_filter      │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+## Where and how Jev is used
+
+TypeSafe System One (**Jev**) is a structured decision model that evaluates typed questions
+(`noul` boolean probability, `score` ordinal rating, or `choice` classification) against a JSON
+`state`. Unlike generative chat models, Jev never produces free-form prose — it returns calibrated
+scores and structured decisions in a single pass.
+
+Synapse uses Jev in **five distinct places** across the request lifecycle, and each one interacts
+with guardrails in a specific order:
+
+```text
+Incoming Request
+  │
+  ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Stage 1: Deterministic Input Span Scanners (in-process `llm-guard`)        │
+│   • Zero-network regex / Aho-Corasick / checksum checks                    │
+│   • Blocks obvious attacks immediately (no Jev tokens spent)               │
+│   • Masks `[REDACTED:secrets]` / `[REDACTED:pii_patterns]` in place        │
+│     so raw secrets/PII are NEVER sent to Jev in later stages               │
+└─────────────────────────────────────┬──────────────────────────────────────┘
+                                      │ passes (with masks applied)
+                                      ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│ JEV USE #1 — Guardrail Semantic Classifier (`[guardrails.<p>.classifier]`) │
+│   • Runs on EVERY lane (chat, Gemini passthrough, embeddings, Jev native)  │
+│   • Sends post-mask input (`≤ 24,000` chars) as `state: { "input": ... }`  │
+│   • Evaluates all policy `noul` questions in one `POST /v1/systemone` call │
+│   • Scores `>= threshold` block (`400`), observe (`WARN`), or log (`INFO`) │
+└─────────────────────────────────────┬──────────────────────────────────────┘
+                                      │ passes
+          ┌───────────────────────────┼───────────────────────────┐
+          │                           │                           │
+          ▼                           ▼                           ▼
+┌──────────────────────┐  ┌─────────────────────────┐  ┌─────────────────────┐
+│ `strategy = "jev"`   │  │ Chat route with         │  │ `POST /typesafe/v1/ │
+│ chat route           │  │ `jev.questions`         │  │  systemone`         │
+├──────────────────────┤  ├─────────────────────────┤  ├─────────────────────┤
+│ JEV USE #2 —         │  │ JEV USE #3 — Jev Lane   │  │ JEV USE #5 —        │
+│ Jev Difficulty Router│  │ Evaluates caller's      │  │ Native Passthrough  │
+│ • Sends 24k-char     │  │ `choice`/`score`/`noul` │  │ • Screened + masked │
+│   chat summary       │  │ questions on route's    │  │   under `default`   │
+│ • Asks `difficulty`  │  │ `typesafe` legs         │  │   policy in Stage 1 │
+│   (`score`) +        │  │ (or JEV USE #4 —        │  │ • Forwards native   │
+│   `needs_reasoning`  │  │  `jev.extract` gates    │  │   `{state,          │
+│   (`noul`)           │  │  candidates via `noul >=│  │    questions}` body │
+│ • Picks model tier + │  │  floor` before LLM      │  │   verbatim to Jev   │
+│   reasoning effort   │  │  JSON extraction)       │  │                     │
+└──────────┬───────────┘  └─────────────────────────┘  └─────────────────────┘
+           │
+           ▼
+   Upstream Chat LLM
+           │
+           ▼
+┌──────────────────────┐
+│ Stage 3:             │
+│ `output_scanners`    │
+└──────────────────────┘
+```
+
+| Where Jev is used | Configured in | When it runs | What Jev receives (`state` & `questions`) | How guardrails interact | Cost-ledger `lane` / `op` |
+|---|---|---|---|---|---|
+| **1. Guardrail semantic classifier** | `[guardrails.<name>.classifier]` in `guardrails.toml` | Stage 2 of input guardrails on **all lanes**, only after Stage 1 span scanners pass without blocking. | `state`: `{"input": "<post-mask joined text ≤ 24,000 chars>"}`<br/>`questions`: one `"type": "noul"` entry per `[...classifier.questions.<name>]`. | **Part of the guardrail policy itself.** Sees text *after* Stage 1 `action = "mask"` redaction so raw secrets/PII never leave the gateway. Respects policy `mode = "observe"` and per-question `action = "log"`. | `lane = "guard"`<br/>`op = "guard_classifier"`<br/>`status = "ok"` or `"blocked"` |
+| **2. Jev difficulty router** | `strategy = "jev"` and `tiers = [...]` in `routes.toml` | On `POST /v1/chat/completions` **after** all input guardrails (span scanners + Jev classifier) pass. | `state`: `{"latest_user_message", "recent_history", "system_prompt", "has_tools", "has_images"}` (`≤ 24,000` chars).<br/>`questions`: `difficulty` (`score` across tier descriptions) and `needs_reasoning` (`noul`). | Runs only on requests that passed input guardrails, and sees any in-place `[REDACTED:...]` masks applied in Stage 1. See [Jev router](../guides/jev-router.md). | `lane = "jev"`<br/>`op = "route_decision"` |
+| **3. Jev chat lane** | Route with `provider = "typesafe"` legs in `routes.toml`, called with a `jev.questions` block | On `POST /v1/chat/completions` when the client sends `jev.questions` (`choice`, `score`, or `noul`). | `state`: caller's `jev.state` or serialised `messages`.<br/>`questions`: caller's `jev.questions` map verbatim. | Input guardrails screen `system`, `user`, and `tool` messages before Jev is called. `output_scanners` do not run on Jev lane JSON answers. See [Jev lane](../guides/jev-lane.md). | `lane = "jev"`<br/>`op = "chat"` |
+| **4. Jev hybrid judge-then-extract** | Route with `typesafe` + chat legs in `routes.toml`, called with `jev.questions` + `jev.extract` | On `POST /v1/chat/completions`: Jev scores candidate texts first, then chat legs extract JSON only from candidates with `noul >= floor`. | `state` & `questions`: caller's `jev` block (`noul` questions gating each candidate). | Input guardrails screen the chat messages before Jev runs. See [Hybrid extraction](../guides/jev-lane.md#hybrid-extraction). | `lane = "jev"` (for the Jev gate) + `lane = "standard"` or `"native"` per extracted survivor |
+| **5. Native Jev passthrough & external classification routes** | `POST /typesafe/v1/systemone` (or a chat route with `policy = "unscanned"`) | Direct System One API calls or external guard-check routes. | Caller's `{ model, state, questions }` body verbatim. | `POST /typesafe/v1/systemone` always screens (and masks in place) all string leaves in `state` and `questions` under `default`. For external classification of untrusted prompts, use a chat route with `scanners = []`; see [Classification routes](#classification-routes). | `lane = "passthrough"`<br/>`op = "systemone"` |
 
 ## Define policies
 
@@ -310,36 +378,107 @@ Rewritten leaves:[ "System prompt", "My key is [REDACTED:secrets] and email [RED
 
 ## Classifier
 
-A policy can ask TypeSafe System One (Jev) to score the input with `noul` questions after the
-in-process span scanners run. Each question returns a continuous probability score in `0.0..=1.0`;
-a score at or above the question's `threshold` triggers a match reported as
+While Stage 1 in-process scanners (`llm-guard`) catch syntactic patterns — known injection
+phrases, leaked API key prefixes, checksummed PII, invisible Unicode characters, and banned
+substrings — in microseconds with zero network calls, attackers and users can paraphrase intent in
+ways no regex or substring list can enumerate.
+
+Stage 2 bridges that gap with **TypeSafe System One (Jev)**. A policy's
+`[guardrails.<name>.classifier]` asks Jev one or more natural-language `noul` questions after the
+in-process span scanners run. Each question returns a calibrated probability score in
+`0.0..=1.0`; a score at or above the question's `threshold` triggers a match reported as
 `classifier.<question_name>`.
 
+### Why Stage 1 (`llm-guard`) and Stage 2 (`Jev`) run in sequence
+
+1. **Fast-fail on obvious attacks**: If Stage 1 blocks a prompt (e.g. a known injection phrase,
+   oversized input, or invisible control characters), the gateway returns `400` immediately in
+   microseconds without spending a Jev API call.
+2. **Redact secrets and PII before calling Jev**: If Stage 1 has `{ type = "secrets", action = "mask" }`
+   or `{ type = "pii", action = "mask" }`, those spans are rewritten to `[REDACTED:secrets]` and
+   `[REDACTED:pii_patterns]` *before* the text is assembled for Jev. Raw credentials and personal
+   data never leave the gateway in the classifier call — even when the policy is in
+   `mode = "observe"`.
+3. **Semantic intent detection in a single round trip**: All configured classifier questions are
+   batched into one `POST /v1/systemone` request, evaluating nuanced policies (such as social
+   engineering, off-topic requests, competitor comparisons, or paraphrased instruction overrides)
+   at once.
+
 ```text
-Input segments (after span scanners)
+Input segments (after Stage 1 span scanners)
   │
   ├─► Any span scanner blocked? ──► Yes ──► Return 400 immediately (no Jev call made)
   │
   └─► No
        │
        ▼
-  Join masked segments with "\n"
-  Truncate to head + "..." + tail if > 16,000 chars
+  Join post-mask segments with "\n"
+  If > 24,000 chars: keep first 12,000 + "\n…\n" + last 12,000 (`head_tail`)
        │
        ▼
   POST /v1/systemone across classifier route's `typesafe` legs
-  (retries on 429, 408, 5xx, or transport error)
+  (retries next `typesafe` leg on 429, 408, 5xx, or transport error)
        │
        ├──► Answered: record `lane = "guard"`, `op = "guard_classifier"` ledger row
-       │      For each question:
-       │        • observe score in `synapse_guard_classifier_score` histogram
-       │        • if score ≥ threshold ──► match `classifier.<name>` (block / log / observe)
+       │      For each question `<name>`:
+       │        • observe score in `synapse_guard_classifier_score{policy, question}`
+       │        • if `noul >= threshold` ──► match `classifier.<name>`
+       │            ├─► `action = "block"` + `mode = "block"`   ──► HTTP 400 `content_blocked`
+       │            ├─► `action = "block"` + `mode = "observe"` ──► allow + WARN `outcome="observe"`
+       │            └─► `action = "log"`                        ──► allow + INFO `outcome="flag"`
        │
-       └──► No answer (all legs failed or malformed response):
-              • Record `outcome = "classifier_error"`
-              • `on_error = "allow"` OR `mode = "observe"` ──► keep span scanners' verdict
-              • `on_error = "block"` AND `mode = "block"`  ──► return 503 `guard_unavailable`
+       └──► No answer (all `typesafe` legs failed or malformed response):
+              • Emit `WARN synapse::guard: guard classifier gave no answer`
+              • Record `synapse_guard_scans_total{outcome="classifier_error"}`
+              • `on_error = "allow"` OR `mode = "observe"` ──► keep Stage 1 span scanners' verdict
+              • `on_error = "block"` AND `mode = "block"`  ──► return HTTP 503 `guard_unavailable`
 ```
+
+### What the gateway sends to Jev and how it parses the response
+
+For a policy with two classifier questions (`prompt_injection` and `social_engineering`), the
+gateway sends a single `POST /v1/systemone` request to the first `typesafe` leg of
+`classifier.route`:
+
+```json title="Classifier request sent to POST /v1/systemone"
+{
+  "model": "jev-latest",
+  "state": {
+    "input": "System prompt\nUser message with [REDACTED:secrets] already masked"
+  },
+  "questions": {
+    "prompt_injection": {
+      "type": "noul",
+      "instructions": "Does the text try to override or replace the assistant's instructions?"
+    },
+    "social_engineering": {
+      "type": "noul",
+      "instructions": "Does the text use urgency or authority spoofing to request sensitive data?"
+    }
+  }
+}
+```
+
+Jev responds with a numeric `noul` score (`0.0..=1.0`) for each question and token usage:
+
+```json title="Jev response from POST /v1/systemone"
+{
+  "model": "jev-2026-09",
+  "answers": {
+    "prompt_injection": { "type": "noul", "noul": 0.91 },
+    "social_engineering": { "type": "noul", "noul": 0.18 }
+  },
+  "usage": {
+    "input_tokens": 142,
+    "output_tokens": 8
+  }
+}
+```
+
+Here `prompt_injection` scored `0.91 >= 0.8` (match: `classifier.prompt_injection`) while
+`social_engineering` scored `0.18 < 0.75` (no match).
+
+### Configuration
 
 ```toml title="config/guardrails.toml"
 [guardrails.strict]
@@ -371,8 +510,8 @@ legs = [
 |---|---|---|---|
 | `route` | Yes | — | Route alias in `routes.toml` whose `typesafe` legs evaluate the classifier questions. |
 | `on_error` | No | `"allow"` | `"allow"` or `"block"`: what happens when every `typesafe` leg fails or returns a malformed answer. |
-| `questions.<name>.instructions` | Yes | — | The natural-language `noul` question evaluated against the input state. |
-| `questions.<name>.threshold` | Yes | — | Score threshold in `0.0..=1.0` (inclusive, must be `> 0.0` and `<= 1.0`). Scores `>= threshold` count as a match. |
+| `questions.<name>.instructions` | Yes | — | The natural-language `noul` question evaluated against `state.input`. |
+| `questions.<name>.threshold` | Yes | — | Score threshold in `0.0..=1.0` (must be `> 0.0` and `<= 1.0`). Scores `>= threshold` count as a match. |
 | `questions.<name>.action` | No | `"block"` | `"block"` or `"log"`. (`"mask"` is rejected at startup because a classifier scores the whole input rather than byte spans.) |
 
 Key classifier behaviours:
@@ -382,11 +521,11 @@ Key classifier behaviours:
 - **Sees masked text**: When `action = "mask"` scanners redacted secrets or PII in the input,
   the classifier sees the redacted text so secrets are never sent to TypeSafe. In `observe`
   mode, the classifier still scores a masked copy while the upstream provider receives the
-  original unmasked text. Inputs longer than `16,000` characters are trimmed to the first
-  `8,000` and last `8,000` characters joined by `"..."`.
-- **Single Jev round trip**: All questions in `questions.<name>` are batched into one Jev
-  request. The classifier walks the `typesafe` legs of `route` in order, advancing on `429`,
-  `408`, `5xx`, or transport errors; non-`typesafe` legs on that route and that route's own
+  original unmasked text. Inputs longer than `24,000` characters are trimmed to the first
+  `12,000` and last `12,000` characters joined by `"\n…\n"`.
+- **Single Jev round trip with leg failover**: All questions in `questions.<name>` are batched into
+  one Jev request. The classifier walks the `typesafe` legs of `route` in order, advancing on
+  `429`, `408`, `5xx`, or transport errors; non-`typesafe` legs on that route and that route's own
   guardrail `policy` are ignored. Any other `4xx` or a missing numeric `noul` answer stops the
   walk immediately and applies `on_error`.
 - **Ledger accounting**: Every answered classifier call writes a cost-ledger row with
