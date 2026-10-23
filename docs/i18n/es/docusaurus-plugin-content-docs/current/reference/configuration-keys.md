@@ -113,8 +113,11 @@ Políticas de guardrails con nombre. Consulta
 
 | Clave | Tipo | Obligatoria | Por defecto | Descripción |
 |---|---|---|---|---|
-| `scanners` | array | Sí | — | Nombres de escáneres, o tablas de escáner. |
-| `mode` | string | No | `"block"` | `"block"` o `"observe"`. |
+| `scanners` | array | Sí | — | Nombres de escáneres de entrada, o tablas de escáner. Usa `[]` para no escanear tramos de entrada. |
+| `mode` | string | No | `"block"` | `"block"` (aplicar bloqueos y máscaras) u `"observe"` (modo dry-run). |
+| `classifier` | table | No | — | Tabla del clasificador `noul` de TypeSafe Jev. Consulta [Clasificador](#guardrailsnameclassifier). |
+| `output_scanners` | array | No | `[]` | Nombres o tablas de escáneres de salida aplicados a las respuestas del asistente en chat completions. |
+| `output_holdback_chars` | integer | No | `256` | Caracteres retenidos mientras se escanea una respuesta de chat en streaming (mínimo `1`). |
 
 ### Tabla de escáner {#scanner-table}
 
@@ -122,13 +125,25 @@ Un escáner es un nombre sin más, como `"secrets"`, o una tabla:
 
 | Clave | Tipo | Usada por | Descripción |
 |---|---|---|---|
-| `type` | string | todos los escáneres | Obligatoria. El nombre del escáner: `prompt_injection`, `secrets`, `pii`, `invisible_text`, `role_override`, `token_limit`, `ban_substrings` o `script_mix`. |
+| `type` | string | todos los escáneres | Obligatoria. El nombre del escáner: `prompt_injection`, `role_override`, `secrets`, `pii`, `invisible_text`, `token_limit`, `ban_substrings`, `isolation_bypass`, `data_exfil` o `script_mix`. |
+| `action` | string | todos los escáneres | Opcional. `"block"`, `"mask"` (válida en `secrets`, `pii`, `ban_substrings`) o `"log"`. Sustituye la severidad por defecto del escáner. |
 | `max_chars` | integer | `token_limit` | Obligatoria para `token_limit`. Longitud máxima de la entrada en caracteres. |
 | `substrings` | array of strings | `ban_substrings` | Obligatoria para `ban_substrings`, no vacía. |
 | `severity` | string | `ban_substrings` | `block` (por defecto), `warn` o `info`. |
 | `threshold` | integer | `script_mix` | Caracteres fuera del alfabeto dominante antes de marcar la petición. Por defecto `2`. |
 
-Consulta [Escáneres](../configuration/guardrails-policy.md#scanners).
+### `[guardrails.<name>.classifier]` {#guardrailsnameclassifier}
+
+| Clave | Tipo | Obligatoria | Por defecto | Descripción |
+|---|---|---|---|---|
+| `route` | string | Sí | — | Alias de ruta en `routes.toml` cuyos tramos `typesafe` evalúan las preguntas del clasificador. |
+| `on_error` | string | No | `"allow"` | `"allow"` o `"block"` cuando todos los tramos `typesafe` fallan o devuelven una respuesta mal formada. |
+| `questions.<q>.instructions` | string | Sí | — | Pregunta `noul` en lenguaje natural evaluada por TypeSafe Jev sobre la entrada enmascarada. |
+| `questions.<q>.threshold` | float | Sí | — | Umbral de puntuación en `(0.0, 1.0]`. Las puntuaciones `>= threshold` cuentan como coincidencia. |
+| `questions.<q>.action` | string | No | `"block"` | `"block"` o `"log"`. (`"mask"` no se admite en preguntas del clasificador.) |
+
+Consulta [Escáneres](../configuration/guardrails-policy.md#scanners) y
+[Clasificador](../configuration/guardrails-policy.md#classifier).
 
 ## `ai_task_types.toml` {#ai_task_typestoml}
 

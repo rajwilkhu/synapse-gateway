@@ -39,9 +39,11 @@ down a dedicated native Vertex lane, while every other request rides the standar
 OpenAI-compatible lane. You get multi-provider routing and Vertex's native features, not
 one or the other.
 
-It also lets a model make routing decisions: the Jev router asks Jev how demanding each
-request is and picks a model tier and reasoning effort for it. And because Synapse is one
-small Rust codebase rather than a framework, the routing, fallback, ledger and
+It also uses TypeSafe System One (**Jev**) across the request lifecycle: a guardrail policy
+can ask Jev to semantically classify inputs before any routing or provider call, the Jev
+router asks Jev how demanding each request is to pick a model tier and reasoning effort, and
+the Jev lane answers typed questions or gates hybrid extractions. Because Synapse is one
+small Rust codebase rather than a framework, the routing, fallback, guardrails, ledger and
 observability code is yours to read, run and embed.
 
 ## When to use Synapse
@@ -107,6 +109,8 @@ Compatibility and operations:
   optionally pushed over OTLP. See [Metrics](../operating/metrics.md), the
   [metrics catalogue](../reference/metrics-catalogue.md) and the
   [Grafana dashboard](../operating/grafana-dashboard.md).
-- **Input guardrails**: named scanner policies (prompt injection, secrets, PII and more)
-  that block or observe requests before they reach a provider. See
+- **Input and output guardrails**: named policies combining deterministic in-process scanners
+  (prompt injection, secrets, PII, tenant-isolation bypass, data exfiltration and more),
+  in-place `[REDACTED:...]` masking, optional Jev semantic classification, streaming output
+  holdback scanning, and `observe` (dry-run) mode. See
   [Guardrails policy](../configuration/guardrails-policy.md).

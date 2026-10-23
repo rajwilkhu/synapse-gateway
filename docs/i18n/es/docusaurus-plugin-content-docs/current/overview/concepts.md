@@ -90,12 +90,15 @@ y [Precios](../configuration/pricing.md).
 
 ## Política de guardrails {#guardrail-policy}
 
-Una lista con nombre de escáneres de entrada, como la detección de inyección de prompts,
-secretos o PII, definida bajo `[guardrails.<name>]` en `guardrails.toml`. Una política o bien
-bloquea las peticiones que coinciden con `400` (modo `block`, el valor por defecto) o bien solo
-las registra (modo `observe`). Una ruta se adhiere con `policy = "<name>"`; las rutas sin
-política usan la política `default` y, si no hay política `default`, esas rutas no se escanean.
-Sin `guardrails.toml` el gateway se niega a arrancar, salvo con `SYNAPSE_GUARDRAILS=optional`,
-que desactiva los guardrails. Consulta [Política de
-guardrails](../configuration/guardrails-policy.md) y [Respuesta de
-bloqueo](../configuration/guardrails-policy.md#block-response).
+Una política de seguridad con nombre definida bajo `[guardrails.<name>]` en `guardrails.toml`
+que puede combinar escáneres de entrada en proceso (`prompt_injection`, `secrets`, `pii`,
+`isolation_bypass`, `data_exfil` y más), enmascaramiento `[REDACTED:<scanner>]` in situ
+(`action = "mask"`), un `classifier` semántico opcional con TypeSafe Jev y `output_scanners`
+para respuestas con o sin streaming. Una política aplica bloqueos y máscaras (`mode = "block"`,
+por defecto) o se ejecuta en modo dry-run en sombra (`mode = "observe"`), registrando y
+contabilizando lo que habría detectado sin bloquear ni modificar el tráfico. Una ruta se
+adhiere con `policy = "<name>"`; las rutas sin política usan `default` y, si no hay política
+`default`, esas rutas no se escanean. Sin `guardrails.toml` el gateway se niega a arrancar,
+salvo con `SYNAPSE_GUARDRAILS=optional`. Consulta
+[Política de guardrails](../configuration/guardrails-policy.md) y
+[Dónde y cómo se usa Jev](../configuration/guardrails-policy.md#where-and-how-jev-is-used).

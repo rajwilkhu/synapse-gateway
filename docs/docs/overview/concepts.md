@@ -83,11 +83,15 @@ can also be published to Google Cloud Pub/Sub and AWS SNS. See the
 
 ## Guardrail policy
 
-A named list of input scanners, such as prompt-injection, secrets or PII detection, defined
-under `[guardrails.<name>]` in `guardrails.toml`. A policy either blocks matching requests
-with `400` (mode `block`, the default) or only records them (mode `observe`). A route opts in
-with `policy = "<name>"`; routes without one use the `default` policy, and without a
-`default` policy those routes are not scanned. Without `guardrails.toml` the gateway refuses
-to start, unless `SYNAPSE_GUARDRAILS=optional`, which turns guardrails off. See
+A named security policy defined under `[guardrails.<name>]` in `guardrails.toml` that can
+combine in-process input span scanners (`prompt_injection`, `secrets`, `pii`,
+`isolation_bypass`, `data_exfil` and more), in-place `[REDACTED:<scanner>]` masking
+(`action = "mask"`), an optional TypeSafe Jev semantic `classifier`, and `output_scanners`
+for buffered and streaming replies. A policy either enforces blocks and masks (`mode = "block"`,
+the default) or runs in dry-run shadow mode (`mode = "observe"`), logging and counting what it
+would have caught without blocking or modifying traffic. A route opts in with
+`policy = "<name>"`; routes without one use the `default` policy, and without a `default`
+policy those routes are not scanned. Without `guardrails.toml` the gateway refuses to start,
+unless `SYNAPSE_GUARDRAILS=optional`. See
 [Guardrails policy](../configuration/guardrails-policy.md) and
-[Block response](../configuration/guardrails-policy.md#block-response).
+[Where and how Jev is used](../configuration/guardrails-policy.md#where-and-how-jev-is-used).
