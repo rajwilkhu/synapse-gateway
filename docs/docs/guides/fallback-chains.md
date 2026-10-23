@@ -24,8 +24,10 @@ failing over from Vertex AI to OpenAI.
   [Providers](../configuration/providers.md#strict-and-lenient-validation).
 
 Only one leg serves each request. Synapse never sends the same request to two legs at once.
-Each leg gets exactly one attempt per request: chat requests have no retries on the same leg
-and no circuit breakers, so a leg that is down is tried, and fails, on every request. See
+On the **standard lane**, each `(provider, model)` leg has its own circuit breaker and
+retry policy (up to 3 total attempts with exponential backoff for transient errors before
+failing over to the next leg, and skipping legs whose circuit breaker is open). On the
+native Vertex, Jev and embedding lanes, each leg gets one attempt per request. See
 [Limitations and roadmap](../reference/limitations-roadmap.md#resilience).
 
 ## What moves to the next leg
@@ -80,7 +82,7 @@ provider is not configured is skipped. See [Embeddings](embeddings.md#fallback).
 
 | Lane | Response |
 |---|---|
-| Standard | `502` with error code `all_legs_failed` and a `failures` array naming each leg's provider, model and error message. |
+| Standard | `502` with error code `all_legs_failed` and a `failures` array naming each leg's provider, model and error message, or `503` with `all_circuits_open` when every leg's circuit breaker is open. |
 | Native Vertex | `502` with error code `upstream_error` and the last leg's error. |
 | Jev, no other legs | `502` with error code `all_legs_failed`. |
 

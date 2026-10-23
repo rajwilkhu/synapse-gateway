@@ -34,8 +34,9 @@ de `tracing`. El valor por defecto es `info`. Un valor no válido también equiv
 | Target | Qué se registra bajo él |
 |---|---|
 | `synapse_gateway` | El binario: mensajes de arranque y de los listeners. |
-| `synapse` | La biblioteca del gateway, como `synapse::ledger::connect` y `synapse::routing::table`. |
-| `synapse::routing` | Decisiones del router Jev. |
+| `synapse` | La biblioteca del gateway, como `synapse::ledger::connect`, `synapse::resilience` y `synapse::routing::table`. |
+| `synapse::guard` | Resultados de guardrails distintos de `pass` (`block`, `observe`, `masked`, `flag`) y fallos del clasificador Jev. |
+| `synapse::routing` | Decisiones del router Jev y conmutaciones (fallbacks) entre tramos de una ruta. |
 | `synapse_a2a` | La carga inicial del registro A2A. |
 | Otros | Dependencias, como `sqlx`. |
 
@@ -46,6 +47,7 @@ RUST_LOG=info                     # el valor por defecto
 RUST_LOG=warn,synapse=info        # solo advertencias de las dependencias
 RUST_LOG=info,sqlx=warn           # oculta los avisos de Postgres al arrancar
 RUST_LOG=info,synapse::routing=warn   # omite los eventos "route planned" por petición
+RUST_LOG=info,synapse::guard=warn     # solo eventos block y observe (dry-run) de guardrails
 ```
 
 Con el registro de costes en Postgres, `sqlx` escribe un aviso `info` por cada columna que el
@@ -80,9 +82,15 @@ porque una credencial de proveedor no está definida con la validación estricta
 
 | Nivel | Target | Mensaje | Significado |
 |---|---|---|---|
+| `WARN` | `synapse::guard` | `guardrail match` | Un escaneo de guardrails produjo `outcome = "block"` u `outcome = "observe"` (dry-run). Campos: `policy`, `lane`, `direction`, `outcome`, `scanners`. Consulta [Política de guardrails](../configuration/guardrails-policy.md#logs-and-ledger-rows). |
+| `INFO` | `synapse::guard` | `guardrail match` | Un escaneo de guardrails produjo `outcome = "masked"` u `outcome = "flag"` (`action = "log"` / severidad `warn`). |
+| `WARN` | `synapse::guard` | `jev guard classifier failed after trying all typesafe legs` | El clasificador Jev de una política no dio respuesta válida; `route`, `model`, `error.kind` y `http.status` indican el motivo. |
 | `INFO` | `synapse::routing` | `route planned` | Uno por petición en una ruta `jev`, con el modo, el nivel decidido, el resultado, el esfuerzo y las puntuaciones de Jev. Consulta [Router Jev](../guides/jev-router.md#metrics-and-logs). |
 | `WARN` | `synapse::routing` | `jev decision timed out; routing to default_tier` | Jev no respondió dentro de `timeout_ms`. |
 | `WARN` | `synapse::routing` | `jev decision failed; routing to default_tier` | Jev falló; `error.kind` y `http.status` indican cómo. El cuerpo de la respuesta nunca se registra. |
+| `WARN` | `synapse::routing` | `leg failed; falling back to next leg` | Un tramo de la ruta falló y la cadena pasó al siguiente tramo, con `route`, `provider`/`model` fallido, siguiente `provider`/`model` y la causa. Consulta [Cadenas de fallback](../guides/fallback-chains.md). |
+| `WARN` | `synapse::resilience` | `retrying outbound call` | Un fallo transitorio (`5xx`, `429`, `408`, timeout/conexión) se está reintentando en el mismo tramo con backoff exponencial (`label`, `attempt`, `next_delay_ms`, `error`). |
+| `WARN` / `INFO` | `synapse::resilience` | `circuit breaker opened`, `circuit breaker half-open`, `circuit breaker closed` | El circuit breaker de un proveedor cambió de estado (`name`, `consecutive_failures`). |
 | `WARN` | `synapse::ledger` | `ledger write failed` | El único destino del registro rechazó una fila, que se pierde. |
 | `WARN` | `synapse::ledger` | `ledger sink write failed` | Uno de varios destinos rechazó una fila; `backend` indica cuál. Los demás destinos sí recibieron la fila. |
 | `WARN` | `synapse::ledger` | `ledger background writer stopped` | El escritor del registro terminó; no se registran más filas. |
@@ -95,11 +103,7 @@ su `request_id`, para que puedas encontrar el uso afectado.
 
 - **Peticiones.** No hay log de accesos. Usa los logs de accesos del proxy o del balanceador de
   carga que tengas delante del gateway.
-- **Errores de proveedores.** Un tramo fallido no se registra. Su error se devuelve al cliente,
-  en el array `failures` de un error `all_legs_failed` o en el mensaje de error, y las métricas
-  muestran qué modelo sirvió cada petición. Consulta
-  [Cadenas de fallback](../guides/fallback-chains.md#when-every-leg-fails).
-- **Contenido.** Los prompts, los mensajes y la salida de los modelos nunca se registran.
+- **Contenido.** Los prompts, los mensajes, los cuerpos de error de proveedores y la salida de los modelos nunca se registran.
 
 ## Trazas {#tracing}
 
