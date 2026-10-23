@@ -58,12 +58,15 @@ tiers, then easier ones. See [Request flow](architecture.md#request-flow) and th
 
 ## Tenant
 
-The customer, team or application a request is attributed to, taken from the
-`x-synapse-tenant` header. Without the header, Synapse uses `SYNAPSE_DEFAULT_TENANT`
-(default `unattributed`). The tenant is recorded on ledger rows, but it is never a metric
-label, because clients control its value. See
-[Tenant attribution](../guides/tenant-attribution.md) and
-[Tenant headers are trusted](../operating/security.md#tenant-headers-are-trusted).
+The customer organisation, team or application a request is attributed to (`x-synapse-tenant`,
+or `org` in `synapse-context`, `synapse-proxy` and `synapse-mcp`), optionally subdivided into a
+**workspace** (`x-synapse-workspace`, or `workspace` in `ContextStore`). Without
+`x-synapse-tenant`, Synapse uses `SYNAPSE_DEFAULT_TENANT` (default `unattributed`). Both
+`tenant` and `workspace` are recorded on ledger rows (and published as `namespace` and
+`workspace` on Pub/Sub and SNS), but are never metric labels, because clients control their
+values. See [Tenant attribution](../guides/tenant-attribution.md),
+[Multi-tenancy with organisations and workspaces](../guides/tenant-attribution.md#multi-tenancy-with-organisations-and-workspaces),
+and [Tenant headers are trusted](../operating/security.md#tenant-headers-are-trusted).
 
 ## AI task type
 
