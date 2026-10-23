@@ -64,12 +64,16 @@ continúa por los niveles más difíciles y después por los más fáciles. Cons
 
 ## Tenant {#tenant}
 
-El cliente, equipo o aplicación al que se atribuye una petición, tomado del encabezado
-`x-synapse-tenant`. Sin ese encabezado, Synapse usa `SYNAPSE_DEFAULT_TENANT` (por defecto,
-`unattributed`). El tenant se guarda en las filas del registro, pero nunca es una etiqueta
-de métrica, porque su valor lo controlan los clientes. Consulta
-[Atribución por tenant](../guides/tenant-attribution.md) y
-[Los encabezados de tenant se aceptan sin comprobar](../operating/security.md#tenant-headers-are-trusted).
+La organización de cliente, equipo o aplicación a la que se atribuye una petición
+(`x-synapse-tenant`, u `org` en `synapse-context`, `synapse-proxy` y `synapse-mcp`),
+opcionalmente subdividida en un **workspace** (`x-synapse-workspace`, o `workspace` en
+`ContextStore`). Sin `x-synapse-tenant`, Synapse usa `SYNAPSE_DEFAULT_TENANT` (por defecto,
+`unattributed`). Tanto `tenant` como `workspace` se guardan en las filas del registro de
+costes (y se publican como `namespace` y `workspace` en Pub/Sub y SNS), pero nunca son
+etiquetas de métrica, porque sus valores los controlan los clientes. Consulta
+[Atribución por tenant](../guides/tenant-attribution.md),
+[Multitenencia con organizaciones y workspaces](../guides/tenant-attribution.md#multi-tenancy-with-organisations-and-workspaces)
+y [Los encabezados de tenant se aceptan sin comprobar](../operating/security.md#tenant-headers-are-trusted).
 
 ## Tipo de tarea de IA {#ai-task-type}
 

@@ -112,6 +112,171 @@ etiqueta propia de tu aplicación, y solo se registra cuando un cliente la enví
 `ai_task_types.toml`, así que los informes se mantienen coherentes aunque los clientes no
 envíen nada.
 
+## Multitenencia con organizaciones y workspaces {#multi-tenancy-with-organisations-and-workspaces}
+
+En despliegues multitenant donde varias organizaciones de clientes (`tenant` / `org`), equipos o
+proyectos (`workspace`) y usuarios finales comparten Synapse, los crates del workspace trabajan
+conjuntamente para **vincular**, **aplicar**, **proteger** y **atribuir** cada llamada a lo largo
+de la jerarquía de dos niveles `(organización, workspace)`.
+
+### Jerarquía de tenencia y correspondencia entre crates {#tenancy-hierarchy-and-cross-crate-mapping}
+
+```text
+Organización (`tenant` / `org` / `namespace`)          p. ej. "acme"
+  └── Workspace (`workspace`)                          p. ej. "onboarding", "prod-support"
+        └── Usuario (`user_id` / `user`)               p. ej. "user-42", "agent-triage"
+              └── Hilo (`thread_id` / `threadId`)      p. ej. "thread-9001"
+                    └── Mensaje (`message_id` / `request_id`) p. ej. "msg-001"
+```
+
+| Nivel | Encabezado de `synapse-gateway` | Campo en `RequestCtx` | Columna en `usage_events` (SQLite / Postgres) | Campo JSON en Pub/Sub y SNS | Clave en `synapse-context` / `synapse-proxy` / `synapse-mcp` |
+|---|---|---|---|---|---|
+| **Organización** | `x-synapse-tenant` | `tenant` | `tenant` (por defecto `SYNAPSE_DEFAULT_TENANT`) | `namespace` (también atributo de filtro del mensaje) | `org` |
+| **Workspace** | `x-synapse-workspace` | `workspace` | `workspace` | `workspace` | `workspace` |
+| **Usuario** | `x-synapse-user` | `user` | `user_id` | `user` | `user` |
+| **Hilo** | `x-synapse-thread` | `thread` | `thread_id` | `threadId` | — |
+| **Mensaje** | `x-synapse-message` | `message` | `message_id` y `request_id` | `messageId` y `requestId` | — |
+
+### Aplicación de la identidad de organización y workspace {#enforcing-org-and-workspace-identity}
+
+Como `synapse-gateway` confía en los encabezados `x-synapse-*` que recibe, los clientes no
+confiables (clientes externos, sandboxes de código o contenedores de agentes) nunca deben llegar
+directamente al gateway. Utiliza uno de estos dos patrones de aplicación:
+
+1. **API gateway o ingress perimetral (API HTTP multitenant)**: Tu ingress o API gateway
+   autentica el token del cliente, elimina cualquier encabezado `x-synapse-*` enviado por el
+   cliente y estampa `x-synapse-tenant: <org>` y `x-synapse-workspace: <workspace>` antes de
+   reenviar la petición a `synapse-gateway`.
+2. **Sandbox no confiable o sidecar de agente (`synapse-context` + `synapse-proxy` + `synapse-mcp`)**:
+   Tu plano de control vincula el contexto activo `(org, workspace, user)` en un `ContextStore`
+   compartido mediante `POST /internal/bind`. Tanto `synapse-proxy` (para llamadas a LLM y HTTP)
+   como `synapse-mcp` (para llamadas a herramientas MCP) leen ese almacén, sobrescriben cualquier
+   encabezado falsificado por el sandbox y **fallan en cerrado (fail closed)** cuando el contexto
+   no está vinculado.
+
+```text
+Plano de control
+  │  POST 127.0.0.1:8788/internal/bind
+  │  {"values": {"org": "acme", "workspace": "onboarding", "user": "user-42"}, "ttl_seconds": 3600}
+  ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│ `ContextStore` compartido (`synapse-context`)                              │
+│   base (static ⊕ env) + overlay con TTL activo → ResolvedContext           │
+└───────────────────┬────────────────────────────────────┬───────────────────┘
+                    │                                    │
+                    ▼                                    ▼
+┌──────────────────────────────────────┐  ┌──────────────────────────────────┐
+│ `synapse-proxy` (:8787)              │  │ `synapse-mcp` (/mcp/{server})    │
+│ • `require_context = ["org",         │  │ • `required = true` en `org` y   │
+│    "workspace"]` (503 si no hay)     │  │   `workspace` (falla en cerrado) │
+│ • Sobrescribe encabezados con:       │  │ • Abre conexión dedicada por     │
+│   `x-synapse-tenant: acme`           │  │   `(server, identity)` con:      │
+│   `x-synapse-workspace: onboarding`  │  │   `x-org-id: acme`               │
+│   `x-synapse-user: user-42`          │  │   `x-workspace-id: onboarding`   │
+└───────────────────┬──────────────────┘  └─────────────────┬────────────────┘
+                    │                                       │
+                    ▼                                       ▼
+┌──────────────────────────────────────┐          Servidores MCP upstream
+│ `synapse-gateway` (:8080)            │
+│ • Guardrails (`isolation_bypass` y   │
+│   `data_exfil`) bloquean fugas entre │
+│   organizaciones o workspaces        │
+│ • Registro de costes anota           │
+│   `tenant="acme"` y                  │
+│   `workspace="onboarding"`           │
+└──────────────────────────────────────┘
+```
+
+Ejemplo de `synapse-proxy.toml` que estampa `org` y `workspace` en las peticiones reenviadas a
+`synapse-gateway`:
+
+```toml title="synapse-proxy.toml"
+addr = "127.0.0.1:8787"
+admin_addr = "127.0.0.1:8788"
+metrics_addr = "127.0.0.1:9091"
+
+[context]
+env = { org = "TENANT_ORG_ID", workspace = "TENANT_WORKSPACE_ID" }
+
+[[routes]]
+name = "llm-gateway"
+path_prefix = "/v1"
+upstream = "http://127.0.0.1:8080"
+strip_prefix = false
+require_context = ["org", "workspace"]
+request_steps = [
+  { inject = { header = "x-synapse-tenant",    from_context = "org" } },
+  { inject = { header = "x-synapse-workspace", from_context = "workspace" } },
+  { inject = { header = "x-synapse-user",      from_context = "user" } },
+]
+```
+
+Consulta [Contexto y transformaciones](../synapse-family/proxy/context-and-transforms.md) e
+[Inyección de identidad](../synapse-family/mcp/identity-injection.md).
+
+### Protección frente a fugas entre organizaciones y workspaces {#guarding-against-cross-tenant-and-cross-workspace-escapes}
+
+Combina la inyección de encabezados con los escáneres multitenant en `config/guardrails.toml`
+para que un modelo o la salida de una herramienta manipulada por inyección de prompt no pueda
+emitir instrucciones o comandos que crucen los límites de organización o workspace:
+
+- **[`isolation_bypass`](../configuration/guardrails-policy.md#isolation_bypass)**: Detecta
+  intentos en prompts o respuestas del modelo de fijar encabezados de identidad (`x-tenant-id`,
+  `x-workspace-id`, `x-user-id`, `x-agent-id`) mediante `curl -H`, literales de diccionario o
+  llamadas a métodos setter, o de alcanzar servicios internos de Kubernetes
+  (`*.svc.cluster.local`).
+- **[`data_exfil`](../configuration/guardrails-policy.md#data_exfil)**: Detecta recorridos no
+  acotados de workspaces, como URIs raíz `cortex://<tenant>/<workspace>/` o `recursive=true` en
+  `/fs/ls`.
+
+```toml title="config/guardrails.toml"
+[guardrails.multi-tenant]
+mode = "block"
+scanners = [
+  "prompt_injection",
+  { type = "secrets", action = "mask" },
+  { type = "pii", action = "mask" },
+  "isolation_bypass",
+  "data_exfil",
+]
+output_scanners = [
+  { type = "secrets", action = "mask" },
+  "isolation_bypass",
+  "data_exfil",
+]
+```
+
+### Consultar el gasto por organización y workspace {#querying-spend-by-organisation-and-workspace}
+
+Desglose del gasto diario y del uso de tokens por organización (`tenant`) y `workspace`:
+
+```sql
+SELECT tenant AS org,
+       COALESCE(workspace, '(none)') AS workspace,
+       substr(ts, 1, 10) AS day,
+       COUNT(*) AS requests,
+       SUM(input_tokens) AS input_tokens,
+       SUM(output_tokens) AS output_tokens,
+       SUM(cost_usd) AS usd
+FROM usage_events
+WHERE status = 'ok'
+GROUP BY tenant, workspace, day
+ORDER BY day DESC, usd DESC;
+```
+
+Recuento de peticiones bloqueadas por guardrails por organización y workspace:
+
+```sql
+SELECT tenant AS org,
+       COALESCE(workspace, '(none)') AS workspace,
+       model AS policy_or_classifier,
+       COUNT(*) AS blocked_requests
+FROM usage_events
+WHERE lane = 'guard' AND status = 'blocked'
+GROUP BY tenant, workspace, model
+ORDER BY blocked_requests DESC;
+```
+
 ## En un gateway embebido {#in-an-embedded-gateway}
 
 Las aplicaciones que embeben el gateway pasan los mismos campos en un `RequestCtx`, cuyos
