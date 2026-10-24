@@ -118,6 +118,7 @@ struct SegmentVerdict {
     wanted: Vec<Action>,
     effects: Vec<Effect>,
     blockers: Vec<String>,
+    patterns: Vec<String>,
     matched: Vec<String>,
     masked: bool,
     /// Each input segment's joined text with every mask span applied, in
@@ -452,6 +453,18 @@ impl GuardEngine {
             if eff != Effect::Block && m.span.end > cut {
                 continue;
             }
+            tracing::info!(
+                target: "synapse::guard",
+                policy,
+                lane = lane.label(),
+                direction,
+                scanner = m.scanner,
+                pattern = pattern_label(&m),
+                start = m.span.start,
+                end = m.span.end,
+                effect = ?eff,
+                "guardrail match span"
+            );
             self.metrics.guard_match(
                 policy,
                 lane.label(),
@@ -462,6 +475,9 @@ impl GuardEngine {
             verdict.matched.push(m.scanner.to_string());
             if eff == Effect::Block {
                 verdict.blockers.push(m.scanner.to_string());
+                if pattern_label(&m) != "-" {
+                    verdict.patterns.push(pattern_label(&m).to_string());
+                }
             }
             if wanted == Action::Mask {
                 spans.push(MaskSpan {
@@ -509,6 +525,7 @@ impl SegmentVerdict {
         self.wanted.extend(other.wanted);
         self.effects.extend(other.effects);
         self.blockers.extend(other.blockers);
+        self.patterns.extend(other.patterns);
         self.matched.extend(other.matched);
         self.masked |= other.masked;
         self.classified.extend(other.classified);
@@ -526,6 +543,7 @@ impl SegmentVerdict {
         Err(GatewayError::ContentBlocked {
             policy: policy.to_string(),
             scanners: self.blockers,
+            patterns: sorted_dedup(self.patterns),
         })
     }
 }
@@ -534,6 +552,15 @@ fn sorted_dedup(mut v: Vec<String>) -> Vec<String> {
     v.sort();
     v.dedup();
     v
+}
+
+/// The match's pattern id for logs; `-` for substring scanners, whose pattern
+/// id is the banned text itself.
+fn pattern_label(m: &llm_guard::Match<'_>) -> &'static str {
+    match m.scanner {
+        "ban_substrings" | "injection" => "-",
+        _ => m.pattern,
+    }
 }
 
 /// Emits a structured tracing log for non-pass guardrail scan outcomes. Never
@@ -669,9 +696,30 @@ mod tests {
             .await
             .unwrap_err()
         {
-            GatewayError::ContentBlocked { policy, scanners } => {
+            GatewayError::ContentBlocked {
+                policy,
+                scanners,
+                patterns,
+            } => {
                 assert_eq!(policy, "strict");
                 assert_eq!(scanners, vec!["ban_substrings".to_string()]);
+                assert!(patterns.is_empty(), "banned text is never a pattern id");
+            }
+            other => panic!("expected ContentBlocked, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn block_names_the_patterns_of_blocking_matches_only() {
+        let e = engine(
+            r#"[guardrails.p]
+            scanners = [{ type = "secrets" }, { type = "pii", action = "log" }]"#,
+        );
+        let text =
+            "mail jane@example.com aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+        match screen_chat(&e, "p", &mut chat(text)).await.unwrap_err() {
+            GatewayError::ContentBlocked { patterns, .. } => {
+                assert_eq!(patterns, vec!["aws_secret_key".to_string()]);
             }
             other => panic!("expected ContentBlocked, got {other:?}"),
         }
@@ -916,6 +964,8 @@ mod tests {
             r#"policy="mask_p" lane="chat" direction="input" outcome="masked" scanners=["secrets"]"#,
             r#"policy="flag_p" lane="chat" direction="input" outcome="flag" scanners=["ban_substrings"]"#,
             r#"policy="output_p" lane="chat" direction="output" outcome="block" scanners=["ban_substrings"]"#,
+            r#"policy="mask_p" lane="chat" direction="input" scanner="secrets" pattern="github_token" start=6 end=46 effect=Mask"#,
+            r#"policy="block_p" lane="chat" direction="input" scanner="ban_substrings" pattern="-" start=8 end=17 effect=Block"#,
         ] {
             assert!(
                 logs.contains(expected),

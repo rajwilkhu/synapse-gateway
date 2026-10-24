@@ -33,6 +33,8 @@ pub enum GatewayError {
     ContentBlocked {
         policy: String,
         scanners: Vec<String>,
+        /// Pattern ids of the blocking matches; never the matched text.
+        patterns: Vec<String>,
     },
     #[error("guard classifier for policy '{policy}' is unavailable")]
     GuardUnavailable { policy: String },
@@ -90,13 +92,19 @@ impl IntoResponse for GatewayError {
         if let GatewayError::AllLegsFailed { failures, .. } = &self {
             error["failures"] = json!(failures);
         }
-        if let GatewayError::ContentBlocked { policy, scanners } = &self {
+        if let GatewayError::ContentBlocked {
+            policy,
+            scanners,
+            patterns,
+        } = &self
+        {
             error["type"] = json!("content_policy_violation");
             error["message"] = json!(format!(
                 "Request blocked by content policy '{policy}' (scanners: {})",
                 scanners.join(", ")
             ));
             error["scanners"] = json!(scanners);
+            error["patterns"] = json!(patterns);
         }
         (self.status(), Json(json!({ "error": error }))).into_response()
     }
@@ -112,10 +120,30 @@ mod tests {
         let e = GatewayError::ContentBlocked {
             policy: "strict".into(),
             scanners: vec!["secrets".into(), "role_override".into()],
+            patterns: vec!["aws_access_key".into()],
         };
         assert_eq!(e.status(), StatusCode::BAD_REQUEST);
         assert_eq!(e.code(), "content_blocked");
         let msg = e.to_string();
         assert!(msg.contains("strict"), "message names the policy: {msg}");
+    }
+
+    #[tokio::test]
+    async fn content_blocked_body_names_the_patterns() {
+        use http_body_util::BodyExt;
+        let e = GatewayError::ContentBlocked {
+            policy: "strict".into(),
+            scanners: vec!["secrets".into()],
+            patterns: vec!["aws_access_key".into()],
+        };
+        let bytes = e
+            .into_response()
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["patterns"], json!(["aws_access_key"]));
     }
 }

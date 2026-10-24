@@ -194,9 +194,17 @@ async fn gemini_passthrough(
 fn gemini_error(e: GatewayError) -> Response {
     let status = e.status();
     let (reason, metadata, message) = match &e {
-        GatewayError::ContentBlocked { policy, scanners } => (
+        GatewayError::ContentBlocked {
+            policy,
+            scanners,
+            patterns,
+        } => (
             "CONTENT_BLOCKED".to_string(),
-            json!({ "policy": policy, "scanners": scanners.join(",") }),
+            json!({
+                "policy": policy,
+                "scanners": scanners.join(","),
+                "patterns": patterns.join(","),
+            }),
             format!(
                 "Request blocked by content policy '{policy}' (scanners: {})",
                 scanners.join(", ")
@@ -871,4 +879,25 @@ fn sse_body(
             }
         })
         .chain(futures::stream::once(async { Ok(Event::default().data("[DONE]")) }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn gemini_block_metadata_names_the_patterns() {
+        let resp = gemini_error(GatewayError::ContentBlocked {
+            policy: "strict".into(),
+            scanners: vec!["secrets".into()],
+            patterns: vec!["aws_access_key".into(), "github_token".into()],
+        });
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["error"]["details"][0]["metadata"]["patterns"],
+            "aws_access_key,github_token"
+        );
+    }
 }
