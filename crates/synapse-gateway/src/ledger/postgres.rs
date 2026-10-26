@@ -54,10 +54,12 @@ impl PostgresLedger {
             .execute(&pool)
             .await
             .map_err(|e| LedgerError::Backend(e.to_string()))?;
-        sqlx::query("ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION")
-            .execute(&pool)
-            .await
-            .map_err(|e| LedgerError::Backend(e.to_string()))?;
+        sqlx::query(
+            "ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|e| LedgerError::Backend(e.to_string()))?;
         sqlx::query("ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS tier TEXT")
             .execute(&pool)
             .await

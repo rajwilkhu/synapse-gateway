@@ -157,10 +157,8 @@ impl Gateway {
             }
         };
         let answers = result.as_ref().ok().map(|d| d.answers);
-        let selection = jev_router::select(
-            result.as_ref().map(|d| d.answers).map_err(|&e| e),
-            route,
-        );
+        let selection =
+            jev_router::select(result.as_ref().map(|d| d.answers).map_err(|&e| e), route);
         if let Ok(d) = &result {
             self.record_route_decision(
                 ctx,
