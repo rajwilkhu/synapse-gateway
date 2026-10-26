@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.4] - 2026-10-26
+
 ### Added
 
 - `secrets` matches an AWS secret access key after a label such as `aws_secret_access_key =` or `"SecretAccessKey":`, as pattern `aws_secret_key`.
