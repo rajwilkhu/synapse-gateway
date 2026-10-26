@@ -98,6 +98,7 @@ async fn blocked_request_returns_400_content_policy_violation() {
     assert_eq!(json["error"]["type"], "content_policy_violation");
     assert_eq!(json["error"]["code"], "content_blocked");
     assert_eq!(json["error"]["scanners"][0], "ban_substrings");
+    assert_eq!(json["error"]["patterns"], serde_json::json!([]));
 }
 
 #[tokio::test]

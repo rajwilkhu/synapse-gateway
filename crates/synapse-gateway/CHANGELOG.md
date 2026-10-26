@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `secrets` matches an AWS secret access key after a label such as `aws_secret_access_key =` or `"SecretAccessKey":`, as pattern `aws_secret_key`.
+- Each guard match logs its policy, lane, direction, scanner, pattern id, byte span and effect under `synapse::guard`, never the matched text. Substring scanners (`ban_substrings`, `injection`) log pattern `-`.
+- An input block response names the pattern IDs of its blocking matches: `error.patterns` (array) on the OpenAI surface, `metadata.patterns` (comma-separated) on the Gemini passthrough. `ban_substrings` and `injection` add none.
+
+### Changed
+
+- `GatewayError::ContentBlocked` has a new `patterns: Vec<String>` field. Code that builds the variant, or matches it without `..`, must name it.
+
+### Fixed
+
+- `secrets` no longer matches the AWS key ID in a presigned URL's `X-Amz-Credential=` parameter, such as a Notion file link. A presigned URL never carries the secret key.
+
 ## [2.0.3] - 2026-10-23
 
 ## [2.0.1] - 2026-10-16

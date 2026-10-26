@@ -6,9 +6,9 @@ use anyhow::{bail, Context};
 use llm_guard::patterns::COMMON_INJECTION_PATTERNS;
 use llm_guard::scanners::{
     BanSubstrings, InvisibleText, PiiPatterns, RegexPattern, RegexScan, RoleOverride, ScriptMix,
-    Secrets, TokenLimit,
+    TokenLimit,
 };
-use llm_guard::{Confidence, ScanResult, Scanner, Severity};
+use llm_guard::{Confidence, Match, ScanResult, Scanner, Severity};
 
 use super::policy::{DetailedScanner, ScannerSpec};
 
@@ -100,9 +100,107 @@ fn data_exfil_scanner() -> anyhow::Result<RegexScan> {
     Ok(RegexScan::new("data_exfil", patterns))
 }
 
+fn secret_pattern(
+    id: &'static str,
+    pat: &str,
+    confidence: Confidence,
+) -> anyhow::Result<RegexPattern> {
+    Ok(RegexPattern::new(id, pat)?
+        .with_severity(Severity::Block)
+        .with_confidence(confidence))
+}
+
+/// Credential patterns. `llm-guard`'s `Secrets` patterns, except that an AWS
+/// key ID counts only outside a presigned URL and a labelled AWS secret
+/// access key is added.
+struct SecretsScan(RegexScan);
+
+const PRESIGNED_KEY_ID_PREFIX: &str = "x-amz-credential=";
+
+impl SecretsScan {
+    fn new() -> anyhow::Result<Self> {
+        let patterns = vec![
+            secret_pattern(
+                "openai_key",
+                r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}\b",
+                Confidence::High,
+            )?,
+            secret_pattern(
+                "aws_access_key",
+                r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[A-Z0-9]{16}\b",
+                Confidence::High,
+            )?,
+            secret_pattern(
+                "aws_secret_key",
+                r#"(?i:aws_?secret_?(?:access_?)?key|secret_?access_?key)["']?\s*[:=]\s*["']?[A-Za-z0-9/+]{40}"#,
+                Confidence::High,
+            )?,
+            secret_pattern(
+                "github_token",
+                r"\bgh[psoru]_[A-Za-z0-9]{36,}\b",
+                Confidence::High,
+            )?,
+            secret_pattern(
+                "slack_token",
+                r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b",
+                Confidence::High,
+            )?,
+            secret_pattern(
+                "stripe_key",
+                r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b",
+                Confidence::High,
+            )?,
+            secret_pattern(
+                "pem_private_key",
+                r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----",
+                Confidence::High,
+            )?,
+            secret_pattern(
+                "jwt",
+                r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
+                Confidence::Medium,
+            )?,
+        ];
+        Ok(Self(RegexScan::new("secrets", patterns)))
+    }
+}
+
+/// A presigned URL carries the key ID, never the secret key; it grants one
+/// request on one object until it expires.
+fn in_presigned_url(input: &str, m: &Match<'_>) -> bool {
+    let before = &input.as_bytes()[..m.span.start];
+    m.pattern == "aws_access_key"
+        && before.len() >= PRESIGNED_KEY_ID_PREFIX.len()
+        && before[before.len() - PRESIGNED_KEY_ID_PREFIX.len()..]
+            .eq_ignore_ascii_case(PRESIGNED_KEY_ID_PREFIX.as_bytes())
+}
+
+/// The regex stops at 40 characters; a longer run is some other value.
+fn longer_than_a_secret_key(input: &str, m: &Match<'_>) -> bool {
+    m.pattern == "aws_secret_key"
+        && input[m.span.end..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '/' || c == '+')
+}
+
+impl Scanner for SecretsScan {
+    fn name(&self) -> &'static str {
+        "secrets"
+    }
+
+    fn scan<'a>(&self, input: &'a str) -> ScanResult<'a> {
+        let mut result = self.0.scan(input);
+        result
+            .matches
+            .retain(|m| !in_presigned_url(input, m) && !longer_than_a_secret_key(input, m));
+        result
+    }
+}
+
 fn build(name: &str, d: Option<&DetailedScanner>) -> anyhow::Result<Vec<Box<dyn Scanner>>> {
     let scanners: Vec<Box<dyn Scanner>> = match name {
-        "secrets" => vec![Box::new(Secrets::new())],
+        "secrets" => vec![Box::new(SecretsScan::new()?)],
         "pii" => vec![Box::new(PiiPatterns::new())],
         "isolation_bypass" => vec![Box::new(isolation_bypass_scanner()?)],
         "data_exfil" => vec![Box::new(data_exfil_scanner()?)],
@@ -311,5 +409,69 @@ mod tests {
         assert!(!s
             .scan(r#"uri=cortex://org/ws/agent/a1/skills/run.sh"#)
             .flagged());
+    }
+
+    /// AWS's documented example credentials.
+    const KEY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
+    const SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+
+    fn patterns(text: &str) -> Vec<&'static str> {
+        let s = &build("secrets", None).unwrap()[0];
+        s.scan(text).matches.iter().map(|m| m.pattern).collect()
+    }
+
+    #[test]
+    fn secrets_ignores_the_key_id_of_a_presigned_url() {
+        let url = format!(
+            "[file.pdf](https://prod-files-secure.s3.us-west-2.amazonaws.com/a/b/file.pdf\
+             ?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD\
+             &X-Amz-Credential={KEY_ID}%2F20261023%2Fus-west-2%2Fs3%2Faws4_request\
+             &X-Amz-Date=20261023T120000Z&X-Amz-Expires=3600&X-Amz-Signature=abc123\
+             &X-Amz-SignedHeaders=host&x-id=GetObject)"
+        );
+        assert_eq!(patterns(&url), Vec::<&str>::new());
+        assert_eq!(
+            patterns(&format!("x-amz-credential={KEY_ID}/20261023")),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn secrets_flags_a_bare_key_id() {
+        assert_eq!(
+            patterns(&format!("the key is {KEY_ID}")),
+            ["aws_access_key"]
+        );
+    }
+
+    #[test]
+    fn secrets_flags_a_labelled_secret_access_key() {
+        for text in [
+            format!("aws_secret_access_key = {SECRET_KEY}"),
+            format!("AWS_SECRET_ACCESS_KEY={SECRET_KEY}"),
+            format!(r#"{{"SecretAccessKey": "{SECRET_KEY}"}}"#),
+        ] {
+            assert_eq!(patterns(&text), ["aws_secret_key"], "{text}");
+        }
+    }
+
+    #[test]
+    fn secrets_ignores_unlabelled_or_longer_40_char_strings() {
+        assert_eq!(
+            patterns(&format!("checksum {SECRET_KEY}")),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            patterns(&format!("aws_secret_access_key = {SECRET_KEY}abc")),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn secrets_keeps_the_other_credential_patterns() {
+        assert_eq!(
+            patterns("token: ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ["github_token"]
+        );
     }
 }

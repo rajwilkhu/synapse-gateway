@@ -689,9 +689,17 @@ comprueba qué bloquearían antes de cambiarlas a `block`.
 
 #### `secrets`
 
-- **Qué detecta**: Claves de API, credenciales de nube, tokens bearer, encabezados de claves
-  privadas, tokens de GitHub (`ghp_...`, `github_pat_...`), tokens de Slack (`xoxb-...`), claves
-  de OpenAI (`sk-...`), claves AWS (`AKIA...`) y secretos de alta entropía.
+- **Qué detecta** (ids de patrón entre paréntesis): claves de OpenAI `sk-...` (`openai_key`),
+  IDs de clave de acceso de AWS `AKIA...`/`ASIA...` (`aws_access_key`), claves de acceso
+  secretas de AWS tras una etiqueta como `aws_secret_access_key =` o `"SecretAccessKey":`
+  (`aws_secret_key`), tokens de GitHub `ghp_...` (`github_token`), tokens de Slack `xoxb-...`
+  (`slack_token`), claves de Stripe (`stripe_key`), encabezados de claves privadas PEM
+  (`pem_private_key`) y JWT (`jwt`).
+- **No detecta**: el ID de clave del parámetro `X-Amz-Credential=` de una URL prefirmada. Una
+  URL prefirmada nunca lleva la clave secreta; autoriza una petición sobre un objeto hasta que
+  caduca.
+- **Logs**: cada coincidencia registra su id de patrón y su rango de bytes en `synapse::guard`,
+  nunca el texto coincidente.
 - **Severidad por defecto**: `block`. Admite `action = "mask"` (`[REDACTED:secrets]`).
 - **Configuración**:
   ```toml
@@ -800,7 +808,8 @@ your system prompt." a una ruta con la política `default` anterior devuelve:
     "type": "content_policy_violation",
     "code": "content_blocked",
     "message": "Request blocked by content policy 'default' (scanners: injection)",
-    "scanners": ["injection"]
+    "scanners": ["injection"],
+    "patterns": []
   }
 }
 ```
@@ -818,14 +827,16 @@ de modo que los SDK de Gemini los leen como errores de Vertex:
       "@type": "type.googleapis.com/google.rpc.ErrorInfo",
       "reason": "CONTENT_BLOCKED",
       "domain": "synapse-gateway",
-      "metadata": { "policy": "default", "scanners": "injection" }
+      "metadata": { "policy": "default", "scanners": "injection", "patterns": "" }
     }]
   }
 }
 ```
 
-`scanners` enumera solo las coincidencias con efecto de bloqueo, ordenadas y sin duplicados, y
-nunca devuelve el texto de entrada que coincidió. La petición no se envía a ningún proveedor.
+`scanners` enumera solo las coincidencias con efecto de bloqueo, ordenadas y sin duplicados.
+`patterns` enumera los IDs de patrón de esas coincidencias (por ejemplo `aws_access_key`),
+ordenados y sin duplicados; `ban_substrings` e `injection` no añaden ninguno, porque su ID de
+patrón es el propio texto prohibido. Nunca se devuelve el texto de entrada que coincidió. La petición no se envía a ningún proveedor.
 
 ## Logs y filas del registro de costes {#logs-and-ledger-rows}
 
