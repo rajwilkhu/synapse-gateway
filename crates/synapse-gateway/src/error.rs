@@ -89,9 +89,13 @@ impl IntoResponse for GatewayError {
             "message": self.to_string(),
             "code": self.code(),
         });
-        if let GatewayError::AllLegsFailed { failures, .. } = &self {
+        let legs_attempted = if let GatewayError::AllLegsFailed { failures, .. } = &self {
             error["failures"] = json!(failures);
-        }
+            error["legs_attempted"] = json!(failures.len());
+            Some(failures.len())
+        } else {
+            None
+        };
         if let GatewayError::ContentBlocked {
             policy,
             scanners,
@@ -106,7 +110,17 @@ impl IntoResponse for GatewayError {
             error["scanners"] = json!(scanners);
             error["patterns"] = json!(patterns);
         }
-        (self.status(), Json(json!({ "error": error }))).into_response()
+        let mut resp = (self.status(), Json(json!({ "error": error }))).into_response();
+        if let Some(count) = legs_attempted {
+            if let Ok(val) = axum::http::HeaderValue::from_str(&count.to_string()) {
+                resp.headers_mut().insert("x-synapse-legs-attempted", val);
+            }
+            resp.headers_mut().insert(
+                "x-synapse-routing-degraded",
+                axum::http::HeaderValue::from_static("all_legs_failed"),
+            );
+        }
+        resp
     }
 }
 
@@ -145,5 +159,36 @@ mod tests {
             .to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"]["patterns"], json!(["aws_access_key"]));
+    }
+
+    #[tokio::test]
+    async fn all_legs_failed_stamps_attempt_headers_and_body_count() {
+        use http_body_util::BodyExt;
+        let e = GatewayError::AllLegsFailed {
+            route: "tiered".into(),
+            failures: vec![
+                LegFailure {
+                    provider: "vertex".into(),
+                    model: "gemini-3-flash".into(),
+                    message: "503".into(),
+                },
+                LegFailure {
+                    provider: "vertex".into(),
+                    model: "gemini-3-pro".into(),
+                    message: "503".into(),
+                },
+            ],
+        };
+        let resp = e.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(resp.headers()["x-synapse-legs-attempted"], "2");
+        assert_eq!(
+            resp.headers()["x-synapse-routing-degraded"],
+            "all_legs_failed"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "all_legs_failed");
+        assert_eq!(body["error"]["legs_attempted"], 2);
     }
 }

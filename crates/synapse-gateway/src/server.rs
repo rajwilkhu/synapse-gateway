@@ -215,6 +215,14 @@ fn gemini_error(e: GatewayError) -> Response {
             json!({ "model": model }),
             e.to_string(),
         ),
+        GatewayError::AllLegsFailed { route, failures } => (
+            "ALL_LEGS_FAILED".to_string(),
+            json!({
+                "route": route,
+                "legs_attempted": failures.len().to_string(),
+            }),
+            e.to_string(),
+        ),
         other => (
             other.code().to_ascii_uppercase(),
             json!({}),
@@ -483,7 +491,7 @@ async fn forward_gemini_legs(
                         status: 502,
                         body: e.to_string(),
                     })?;
-                return Ok(response);
+                return Ok(with_passthrough_leg_headers(response, i + 1, true));
             }
 
             let bytes = resp.bytes().await.map_err(|e| GatewayError::Upstream {
@@ -494,7 +502,8 @@ async fn forward_gemini_legs(
                 guard.observe_usage_metadata(&value);
             }
             drop(guard);
-            return passthrough_response(status.as_u16(), "application/json", bytes);
+            return passthrough_response(status.as_u16(), "application/json", bytes)
+                .map(|r| with_passthrough_leg_headers(r, i + 1, true));
         }
 
         let bytes = resp.bytes().await.unwrap_or_default();
@@ -517,16 +526,42 @@ async fn forward_gemini_legs(
             last_failure = Some((status.as_u16(), bytes));
             continue;
         }
-        return passthrough_response(status.as_u16(), "application/json", bytes);
+        return passthrough_response(status.as_u16(), "application/json", bytes)
+            .map(|r| with_passthrough_leg_headers(r, i + 1, false));
     }
 
     if let Some((code, bytes)) = last_failure {
-        return passthrough_response(code, "application/json", bytes);
+        return passthrough_response(code, "application/json", bytes)
+            .map(|r| with_passthrough_leg_headers(r, chain.legs.len(), false));
     }
     Err(GatewayError::Upstream {
         status: 502,
         body: "gemini passthrough: empty vertex fallback chain".into(),
     })
+}
+
+/// Stamps `x-synapse-legs-attempted` and `x-synapse-routing-degraded` when a
+/// multi-leg passthrough chain advanced past the primary leg.
+fn with_passthrough_leg_headers(
+    mut resp: Response,
+    legs_attempted: usize,
+    succeeded: bool,
+) -> Response {
+    if legs_attempted > 1 {
+        if let Ok(val) = HeaderValue::from_str(&legs_attempted.to_string()) {
+            resp.headers_mut().insert("x-synapse-legs-attempted", val);
+        }
+        let degraded = if succeeded {
+            "leg_escalation"
+        } else {
+            "all_legs_failed"
+        };
+        resp.headers_mut().insert(
+            "x-synapse-routing-degraded",
+            HeaderValue::from_static(degraded),
+        );
+    }
+    resp
 }
 
 /// TypeSafe System One (Jev) passthrough (`POST /typesafe/v1/systemone`):
@@ -751,6 +786,10 @@ impl Drop for PassthroughUsageGuard {
             op: self.op.into(),
             user_task_type: self.attribution.user_task_type.clone(),
             ai_task_type: self.attribution.ai_task_type.clone(),
+            score: None,
+            confidence: None,
+            tier: None,
+            outcome: None,
         });
     }
 }

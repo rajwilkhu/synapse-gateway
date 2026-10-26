@@ -155,18 +155,28 @@ impl Gateway {
                         .routing_decision_duration(&req.model, started.elapsed().as_secs_f64())
                 })
             }
-        }
-        .tap_ok(|d| {
-            self.record_route_decision(ctx, &req.model, request_id, &route.router.model, d)
-        });
+        };
         let answers = result.as_ref().ok().map(|d| d.answers);
-        (
-            jev_router::select(result.map(|d| d.answers), route),
-            answers,
-        )
+        let selection = jev_router::select(
+            result.as_ref().map(|d| d.answers).map_err(|&e| e),
+            route,
+        );
+        if let Ok(d) = &result {
+            self.record_route_decision(
+                ctx,
+                &req.model,
+                request_id,
+                &route.router.model,
+                d,
+                &route.tiers[selection.tier].name,
+                selection.outcome,
+            );
+        }
+        (selection, answers)
     }
 
     /// One ledger row per Jev decision, joined to the chat row by `request_id`.
+    #[allow(clippy::too_many_arguments)]
     fn record_route_decision(
         &self,
         ctx: &RequestCtx,
@@ -174,6 +184,8 @@ impl Gateway {
         request_id: &str,
         model: &str,
         d: &Decision,
+        tier: &str,
+        outcome: DecisionOutcome,
     ) {
         let attr = self.attribution_of(ctx, route);
         self.ledger.enqueue(UsageEntry {
@@ -197,6 +209,10 @@ impl Gateway {
             op: "route_decision".into(),
             user_task_type: attr.user_task_type,
             ai_task_type: attr.ai_task_type,
+            score: Some(d.answers.difficulty),
+            confidence: Some(d.answers.confidence),
+            tier: Some(tier.to_string()),
+            outcome: Some(outcome.metric_label().to_string()),
         });
     }
 }

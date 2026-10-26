@@ -251,10 +251,16 @@ async fn hard_decision_serves_the_hard_tier_with_its_effort() {
     assert_eq!(decision.input_tokens, 400);
     assert_eq!(decision.route, "auto");
     assert_eq!(decision.tenant, "acme");
+    assert_eq!(decision.score, Some(2.0));
+    assert_eq!(decision.confidence, Some(0.9));
+    assert_eq!(decision.tier.as_deref(), Some("hard"));
+    assert_eq!(decision.outcome.as_deref(), Some("decided"));
     let chat = rows.iter().find(|r| r.op == "chat").expect("chat row");
     assert_eq!(chat.model, "qwen-max");
     assert_eq!(chat.request_id, decision.request_id);
     assert_eq!(chat.tenant, decision.tenant);
+    assert_eq!(chat.score, None);
+    assert_eq!(chat.tier, None);
 }
 
 #[tokio::test]
@@ -580,7 +586,14 @@ async fn low_confidence_routes_to_default_tier_but_still_records_the_decision() 
         Some("low_confidence")
     );
     let rows = wait_rows(&store, 2).await;
-    assert!(rows.iter().any(|r| r.op == "route_decision"), "{rows:?}");
+    let decision = rows
+        .iter()
+        .find(|r| r.op == "route_decision")
+        .expect("decision row");
+    assert_eq!(decision.score, Some(2.0));
+    assert_eq!(decision.confidence, Some(0.2));
+    assert_eq!(decision.tier.as_deref(), Some("moderate"));
+    assert_eq!(decision.outcome.as_deref(), Some("low_confidence"));
     assert_metric_line(
         &metrics(),
         r#"synapse_routing_decisions_total{outcome="low_confidence",route="auto",tier="moderate"} 1"#,

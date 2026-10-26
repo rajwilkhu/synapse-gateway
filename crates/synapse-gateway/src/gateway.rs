@@ -276,6 +276,10 @@ impl Gateway {
             op: "guard_classifier".into(),
             user_task_type: attr.user_task_type,
             ai_task_type: attr.ai_task_type,
+            score: None,
+            confidence: None,
+            tier: None,
+            outcome: None,
         });
     }
 
@@ -308,6 +312,10 @@ impl Gateway {
             op: "guard_input".into(),
             user_task_type: attr.user_task_type,
             ai_task_type: attr.ai_task_type,
+            score: None,
+            confidence: None,
+            tier: None,
+            outcome: None,
         });
     }
 
@@ -374,6 +382,10 @@ impl Gateway {
             op: "chat".into(),
             user_task_type: attr.user_task_type,
             ai_task_type: attr.ai_task_type,
+            score: None,
+            confidence: None,
+            tier: None,
+            outcome: None,
         });
         let span_lane = match lane {
             "native" => Lane::NativeVertex,
@@ -1057,6 +1069,10 @@ impl Gateway {
             op: "embedding".into(),
             user_task_type: attr.user_task_type,
             ai_task_type: attr.ai_task_type,
+            score: None,
+            confidence: None,
+            tier: None,
+            outcome: None,
         });
     }
 }
@@ -1382,6 +1398,10 @@ impl Drop for StreamSideEffects {
             op: "chat".into(),
             user_task_type: self.attribution.user_task_type.clone(),
             ai_task_type: self.attribution.ai_task_type.clone(),
+            score: None,
+            confidence: None,
+            tier: None,
+            outcome: None,
         });
 
         // Metrics via GenAiSpan for parity with the buffered path: build a minimal

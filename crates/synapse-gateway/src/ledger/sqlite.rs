@@ -55,6 +55,18 @@ impl SqliteLedger {
         let _ = sqlx::query("ALTER TABLE usage_events ADD COLUMN ai_task_type TEXT")
             .execute(&pool)
             .await;
+        let _ = sqlx::query("ALTER TABLE usage_events ADD COLUMN score REAL")
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE usage_events ADD COLUMN confidence REAL")
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE usage_events ADD COLUMN tier TEXT")
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE usage_events ADD COLUMN outcome TEXT")
+            .execute(&pool)
+            .await;
 
         Ok(Self { pool })
     }
@@ -66,8 +78,9 @@ impl LedgerStore for SqliteLedger {
         sqlx::query(
             "INSERT INTO usage_events \
              (ts, tenant, workspace, user_id, thread_id, message_id, route, provider, model, lane, \
-              input_tokens, output_tokens, cost_usd, request_id, status, user_task_type, ai_task_type) \
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+              input_tokens, output_tokens, cost_usd, request_id, status, user_task_type, ai_task_type, \
+              score, confidence, tier, outcome) \
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(e.ts.to_rfc3339())
         .bind(&e.tenant)
@@ -86,6 +99,10 @@ impl LedgerStore for SqliteLedger {
         .bind(&e.status)
         .bind(&e.user_task_type)
         .bind(&e.ai_task_type)
+        .bind(e.score)
+        .bind(e.confidence)
+        .bind(&e.tier)
+        .bind(&e.outcome)
         .execute(&self.pool)
         .await
         .map_err(|e| LedgerError::Backend(e.to_string()))?;
@@ -119,6 +136,10 @@ mod tests {
             op: "chat".into(),
             user_task_type: None,
             ai_task_type: "simple".into(),
+            score: None,
+            confidence: None,
+            tier: None,
+            outcome: None,
         }
     }
 
@@ -163,6 +184,31 @@ mod tests {
     #[tokio::test]
     async fn stores_null_user_task_type_when_absent() {
         assert_eq!(stored_user_task_type(&entry()).await, None);
+    }
+
+    #[tokio::test]
+    async fn persists_route_decision_columns() {
+        let store = SqliteLedger::connect("sqlite::memory:").await.unwrap();
+        let e = UsageEntry {
+            op: "route_decision".into(),
+            score: Some(0.84),
+            confidence: Some(0.93),
+            tier: Some("hard".into()),
+            outcome: Some("decided".into()),
+            ..entry()
+        };
+        store.record(&e).await.unwrap();
+        let row = sqlx::query("SELECT score, confidence, tier, outcome FROM usage_events")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<Option<f64>, _>("score"), Some(0.84));
+        assert_eq!(row.get::<Option<f64>, _>("confidence"), Some(0.93));
+        assert_eq!(row.get::<Option<String>, _>("tier"), Some("hard".into()));
+        assert_eq!(
+            row.get::<Option<String>, _>("outcome"),
+            Some("decided".into())
+        );
     }
 
     /// A database created before `user_task_type` existed is upgraded in place by

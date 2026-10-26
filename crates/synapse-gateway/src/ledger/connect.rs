@@ -212,6 +212,10 @@ mod tests {
                 op: "chat".into(),
                 user_task_type: None,
                 ai_task_type: "simple".into(),
+                score: None,
+                confidence: None,
+                tier: None,
+                outcome: None,
             })
             .await
             .unwrap();
@@ -259,6 +263,10 @@ mod tests {
             op: "chat".into(),
             user_task_type: None,
             ai_task_type: "simple".into(),
+            score: None,
+            confidence: None,
+            tier: None,
+            outcome: None,
         };
         store.record(&entry).await.unwrap();
         store.record(&entry).await.unwrap();

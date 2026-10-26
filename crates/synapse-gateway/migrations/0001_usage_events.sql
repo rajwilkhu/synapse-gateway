@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS usage_events (
     request_id    TEXT    NOT NULL,
     status        TEXT    NOT NULL,
     user_task_type TEXT,
-    ai_task_type  TEXT
+    ai_task_type  TEXT,
+    score         REAL,
+    confidence    REAL,
+    tier          TEXT,
+    outcome       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_usage_tenant ON usage_events (tenant, workspace);

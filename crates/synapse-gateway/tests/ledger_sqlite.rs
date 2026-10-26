@@ -25,6 +25,10 @@ async fn records_and_persists_a_usage_row() {
         op: "chat".into(),
         user_task_type: Some("summarisation".into()),
         ai_task_type: "conversation".into(),
+        score: Some(1.5),
+        confidence: Some(0.92),
+        tier: Some("hard".into()),
+        outcome: Some("decided".into()),
     };
     store.record(&entry).await.unwrap();
     store.record(&entry).await.unwrap();

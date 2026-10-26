@@ -48,6 +48,14 @@ pub struct UsageEntry {
     /// `x-synapse-ai-task-type` when supplied, else inferred from the route
     /// alias, else `"simple"`. Always resolved, so never optional.
     pub ai_task_type: String,
+    /// Jev difficulty score (`op = "route_decision"` only).
+    pub score: Option<f64>,
+    /// Jev confidence in `[0.0, 1.0]` (`op = "route_decision"` only).
+    pub confidence: Option<f64>,
+    /// Tier selected by the router (`op = "route_decision"` only).
+    pub tier: Option<String>,
+    /// Decision outcome label (`decided` or `low_confidence`; `op = "route_decision"` only).
+    pub outcome: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -203,6 +211,10 @@ mod tests {
             op: "chat".into(),
             user_task_type: None,
             ai_task_type: "simple".into(),
+            score: None,
+            confidence: None,
+            tier: None,
+            outcome: None,
         }
     }
 

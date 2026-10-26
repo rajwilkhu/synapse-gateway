@@ -48,6 +48,14 @@ pub struct UsageEvent {
     /// Resolved classification of the work the gateway performed. Always set
     /// (defaults to `"simple"`), so unlike `user_task_type` it is never skipped.
     pub ai_task_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 impl From<&UsageEntry> for UsageEvent {
@@ -72,6 +80,10 @@ impl From<&UsageEntry> for UsageEvent {
             op: e.op.clone(),
             user_task_type: e.user_task_type.clone(),
             ai_task_type: e.ai_task_type.clone(),
+            score: e.score,
+            confidence: e.confidence,
+            tier: e.tier.clone(),
+            outcome: e.outcome.clone(),
         }
     }
 }
@@ -117,7 +129,27 @@ mod tests {
             op: "chat".into(),
             user_task_type: None,
             ai_task_type: "simple".into(),
+            score: None,
+            confidence: None,
+            tier: None,
+            outcome: None,
         }
+    }
+
+    #[test]
+    fn serializes_route_decision_receipt_fields_when_present() {
+        let mut e = entry();
+        e.op = "route_decision".into();
+        e.score = Some(1.75);
+        e.confidence = Some(0.91);
+        e.tier = Some("hard".into());
+        e.outcome = Some("decided".into());
+        let v = serde_json::to_value(UsageEvent::from(&e)).unwrap();
+        assert_eq!(v["op"], "route_decision");
+        assert_eq!(v["score"], 1.75);
+        assert_eq!(v["confidence"], 0.91);
+        assert_eq!(v["tier"], "hard");
+        assert_eq!(v["outcome"], "decided");
     }
 
     #[test]
